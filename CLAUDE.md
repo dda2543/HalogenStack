@@ -190,7 +190,7 @@ Makefile) и все руководства (`docs/admin-*.md`, `docs/server-test
 
 **Точка входа следующей сессии:** человек прогоняет
 `docs/server-test-checklist.md` на сервере и приносит результаты (особенно
-раздел D: `ipc: host`, `NET_RAW`) и красные пункты с логам. План после
+раздел D: `ipc: host`, `NET_RAW`) и красные пункты с логами. План после
 зелёного прогона — каркас фазы 2: `compose.public.yaml` + waf-firewall
 (Caddy+Coraza, TLS ai.dda2543.ru). Открытых вопросов нет.
 

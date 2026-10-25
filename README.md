@@ -25,6 +25,30 @@
 | waf-firewall | Caddy + Coraza (CRS); TLS-терминация `ai.dda2543.ru`; только публичный путь WebUI |
 | egress-proxy | squid: единственный маршрут наружу; whitelist + GET |
 
+## Архитектура
+
+Каноническое описание: [docs/architecture.md](docs/architecture.md).
+
+```
+                              интернет
+                                 │ 443/tcp, TLS ai.dda2543.ru (фаза 2)
+                          ┌──────▼───────┐
+                          │ waf-firewall │  Caddy + Coraza (CRS)
+                          └──────┬───────┘
+ LAN (2 ноутбука)                │
+   агенты ──8731/tcp──▶ ┌────────▼────────┐
+   (HTTP, MVP)          │  reverse-proxy  │──forward-auth──▶ [internal-auth-provider]
+                        └───┬──────────┬──┘                        (ключи: файлы хоста)
+                            ▼          ▼
+                 [halogen-flash-     [web-ui] ─HTTP_PROXY─▶ [egress-proxy/squid] ─▶ интернет
+                  server] (GPU)                            (whitelist + только GET)
+```
+
+Сети: `internal` (без шлюза: halogen, proxy, auth-provider, web-ui),
+`egress` (web-ui ↔ squid ↔ мир), `public` (waf ↔ proxy, фаза 2).
+На хост проброшены ровно два порта: `LAN_IP:8731` и (фаза 2) `0.0.0.0:443`.
+`egress-proxy` — единственный контейнер с маршрутом в интернет.
+
 ## Фазы
 
 - **Фаза 1 (MVP):** внутренний контур — halogen, reverse-proxy, auth-provider,
@@ -43,4 +67,5 @@
 ## Документация
 
 Рабочий документ проекта (решения, противоречия, соглашения) — [CLAUDE.md](CLAUDE.md).
+Архитектура — [docs/architecture.md](docs/architecture.md).
 Административные руководства (ключи, ACL, whitelist) — `docs/` (в процессе).

@@ -151,7 +151,10 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 
 На 2026-10-25 открытых вопросов **не осталось** (всё закрыто в §1.2, §9).
 Архитектура зафиксирована: **`docs/architecture.md`** (канон).
-Следующий артефакт: каркас compose/Makefile — ждёт «go» от человека.
+Каркас фазы 1 создан 2026-10-25 (`compose.yaml`, Caddyfile, squid.conf,
+auth-provider, Makefile, примеры env/secrets); смоук-тест auth-provider в
+контейнере агента — 6/6 PASS. Ожидает: проверка на сервере (чек-лист
+architecture.md §7), admin-руководства в `docs/`, каркас фазы 2.
 
 ## 8. Соглашения
 

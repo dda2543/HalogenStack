@@ -1,0 +1,112 @@
+# halogen-stack, фаза 1 (MVP): внутренний контур без публичного входа.
+# Канон архитектуры: docs/architecture.md
+name: halogen-stack
+
+networks:
+  internal:
+    internal: true   # без шлюза: участники не имеют выхода в интернет
+  egress:
+    driver: bridge   # единственная сеть со шлюзом наружу (через egress-proxy)
+
+volumes:
+  caddy_data:
+  caddy_config:
+  webui_data:
+
+services:
+  halogen-flash-server:
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.18.15
+    container_name: halogen-flash-server
+    restart: unless-stopped
+    networks: [internal]
+    # Портов на хосте нет: доступен только reverse-proxy (networks: internal).
+    # В MVP работает БЕЗ HALOGEN_API_KEY (решение §1.2 CLAUDE.md; ключ — roadmap).
+    # ТЕСТ СЕРВЕРА (§7 architecture): заменить ipc:host на приватный ipc + shm_size.
+    ipc: host
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /run:size=64m,mode=1777
+    cap_drop: [ALL]
+    # ТЕСТ СЕРВЕРА: если ROCm потребует NET_RAW/NET_BIND_SERVICE — вернуть явно.
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add: [keep-groups]
+    environment:
+      HALOGEN_CTX: "262144"
+      HALOGEN_KV_POOL_POSITIONS: "524288"
+      HALOGEN_KV_SLOTS: "4"
+      HALOGEN_MAX_TOKENS_DEFAULT: "16384"
+      HALOGEN_MAX_TOK: "16384"
+      HALOGEN_REASONING_EFFORT: xhigh
+      HALOGEN_CACHE_DIR: /cache
+      HALOGEN_CACHE_DISK_GIB: "64"
+      HALOGEN_CACHE_PRUNE_OLD: "1"
+    volumes:
+      - ${HALOGEN_MODELS_DIR}:/models:ro
+      - ${CACHE_DIR:-./cache}:/cache:z
+
+  reverse-proxy:
+    image: docker.io/library/caddy:2
+    container_name: halogen-reverse-proxy
+    restart: unless-stopped
+    networks: [internal]
+    ports:
+      # bind только на LAN-интерфейс (агенты); НЕ 0.0.0.0 — см. тест-чек §7.
+      - "${LAN_IP}:8731:8080"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro:z
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - internal-auth-provider
+      - halogen-flash-server
+
+  internal-auth-provider:
+    build: ./auth-provider
+    image: localhost/halogen-auth-provider:0.1
+    container_name: halogen-auth-provider
+    restart: unless-stopped
+    networks: [internal]
+    # Портов на хосте нет: его спрашивает только reverse-proxy (forward_auth).
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ${SECRETS_DIR:-./secrets}/keys.acl:/etc/auth-provider/keys.acl:ro,z
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  web-ui:
+    image: ghcr.io/open-webui/open-webui:v0.12.4
+    container_name: halogen-web-ui
+    restart: unless-stopped
+    networks: [internal, egress]
+    environment:
+      OPENAI_API_BASE_URL: http://reverse-proxy:8080/v1
+      OPENAI_API_KEY: ${WEBUI_SERVICE_KEY:?WEBUI_SERVICE_KEY задаётся в .env (make key-add NAME=webui)}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY задаётся в .env}
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "false"
+      # Весь исходящий трафик — только через egress-proxy (whitelist+GET).
+      HTTP_PROXY: http://egress-proxy:3128
+      HTTPS_PROXY: http://egress-proxy:3128
+      NO_PROXY: reverse-proxy,internal-auth-provider,localhost,127.0.0.1
+    volumes:
+      - webui_data:/app/backend/data
+
+  egress-proxy:
+    image: docker.io/ubuntu/squid:6
+    container_name: halogen-egress-proxy
+    restart: unless-stopped
+    networks: [egress]   # только egress: в internal её нет
+    volumes:
+      - ./config/squid/squid.conf:/etc/squid/squid.conf:ro,z
+      - ./config/squid/whitelist.txt:/etc/squid/whitelist.txt:ro,z

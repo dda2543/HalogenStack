@@ -1,0 +1,5 @@
+.env
+secrets/keys.acl
+cache/
+data/
+*.tmp

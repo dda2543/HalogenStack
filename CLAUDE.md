@@ -27,6 +27,7 @@
 | 3 | internal-auth-provider | владеет всеми ключами пользователей |
 | 4 | reverse-proxy | единственная точка входа к LLM API |
 | 5 | waf-firewall | фильтрация входящего трафика |
+| 6 | egress-proxy | squid: единственный маршрут web-ui наружу (whitelist + GET) |
 
 На будущее (возможно, на отдельном сервере мониторинга): metrics-waf,
 node-exporter, blackbox-exporter, prometheus, grafana.
@@ -65,6 +66,13 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   в roadmap (§9).
 - Whitelist доменов WebUI: **изначально пуст**; в документации — пример
   добавления php.net.
+- `egress-proxy` (squid) **одобрен** как 6-й сервис: единственный контейнер
+  с маршрутом наружу; web-ui ходит через него по `HTTP_PROXY`.
+- ПО прокси **одобрено — Caddy дважды**: `waf-firewall` = Caddy+Coraza (CRS),
+  `reverse-proxy` = чистый Caddy с `forward_auth` к auth-provider.
+- MVP: `halogen-flash-server` запускается **без** `HALOGEN_API_KEY` (не
+  тестирован на сервере). Защита LLM API — только сетевая изоляция (доступен
+  лишь с reverse-proxy). Включение ключа — roadmap (§9).
 
 ## 2. Режим работы
 
@@ -122,8 +130,8 @@ node-exporter, blackbox-exporter, prometheus, grafana.
    (и `ipc: host` для ROCm shared memory). Цели 5–6 требуют internal-сетей.
    Нужно проверить, живёт ли `ipc: host` с podman-сетями (скорее да: ipc и сеть
    независимы), и чем заменить `NET_RAW`/`NET_BIND_SERVICE`.
-2. **Один ключ сервера vs 4 пользователя** — решение на уровне reverse proxy
-   (выбор: nginx / caddy / envoy / traefik). Плюс: rate-limit и учёт по ключам.
+2. ~~Один ключ сервера vs 4 пользователя~~ — **решено**: reverse-proxy Caddy +
+   forward-auth к auth-provider (§1.2).
 3. **WebUI наружу только GET на разрешённые сайты.** «Только документация» —
    семантически нефильтруемо; технический компромисс: egress-прокси (squid-подобный)
    с whitelist доменов + метод GET + allowlist Content-Type (text/html,
@@ -131,28 +139,18 @@ node-exporter, blackbox-exporter, prometheus, grafana.
    конкретного списка доменов (§7.6). Также: сборка образа Open WebUI требует
    pypi/npm на build-time — это отдельный сетевой контекст, не runtime.
 4. ~~GPU~~ — **принято как ограничение** (см. §1.2).
-5. **Обратный прокси: какой?** Кандидаты nginx/caddy; требования: TLS-терминация?,
-   маппинг ключей, лимиты, отсутствие прямого доступа к LLM-контейнеру
-   (внутренняя сеть без маршрута извне).
+5. ~~Обратный прокси: какой?~~ — **решено**: Caddy (§1.2).
 6. ~~Имя сервиса №1~~ — **разрешено**: сервис №1 = `halogen-flash-server`.
-8. **В списке сервисов нет egress-фильтра для WebUI.** «Только документация
-   наружу» требует L7-прокси (squid). Либо добавить 6-й сервис `egress-proxy`,
-   либо WebUI ходит наружу через `waf-firewall` (нежелательно: смешивает
-   ingress- и egress-политики). Решение не принято.
+8. ~~Нет egress-фильтра для WebUI~~ — **решено**: `egress-proxy` (squid)
+   одобрен как 6-й сервис (§1.2).
 7. **`ipc: host` в проверенном compose** делит IPC-namespace хоста — против
    цели 5. Проверить на сервере: ROCm с приватным IPC + `shm_size` вместо
    `ipc: host`; заодно — нужна ли ещё `NET_RAW`.
 
 ## 7. Открытые вопросы к человеку
 
-1. **`egress-proxy` как 6-й сервис** — не подтверждено (§6.8). Без него цель 6
-   для WebUI невыполнима.
-2. **Выбор ПО reverse-proxy и waf-firewall.** Рекомендация: Caddy в обоих
-   (waf = caddy+coraza, reverse-proxy = чистый caddy с `forward_auth`) —
-   одна технология, два конфига. Альтернатива: nginx (+ModSecurity).
-3. **Хранение upstream-ключа `HALOGEN_API_KEY`** — предложение: файл на хосте,
-   монтируется только в reverse-proxy. Подтвердить.
-4. **DNS-запись ai.dda2543.ru** — задача человека перед публичным запуском.
+На 2026-10-25 открытых вопросов **не осталось** (всё закрыто в §1.2, §9).
+Следующий артефакт: каркас compose/Makefile — ждёт «go» от человека.
 
 ## 8. Соглашения
 
@@ -168,3 +166,6 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 - Публичный запуск WebUI требует: DNS-запись ai.dda2543.ru → IP сервера,
   certbot на хосте (через make), затем включение публичного входа.
 - Единый вход в Open WebUI через auth-provider (OIDC) — если потребуется.
+- Включить `HALOGEN_API_KEY` на halogen-flash-server (defense-in-depth: ключ
+  знает только reverse-proxy) — после тестирования на сервере; в MVP работает
+  без него, полагаясь на сетевую изоляцию (§1.2).

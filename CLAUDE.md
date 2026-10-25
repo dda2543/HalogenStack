@@ -177,3 +177,20 @@ auth-provider, Makefile, примеры env/secrets); смоук-тест auth-p
 - Включить `HALOGEN_API_KEY` на halogen-flash-server (defense-in-depth: ключ
   знает только reverse-proxy) — после тестирования на сервере; в MVP работает
   без него, полагаясь на сетевую изоляцию (§1.2).
+
+## 10. Журнал
+
+**2026-10-25 (сессия 1).** Согласованы цели, список сервисов (6) и архитектура
+(`docs/architecture.md` — канон); написан каркас фазы 1 (compose, Caddy
+forward_auth, squid egress с пустым whitelist, auth-provider на node,
+Makefile) и все руководства (`docs/admin-*.md`, `docs/server-test-checklist.md`);
+смоук-тест auth-provider 6/6 PASS; исправлен дефект: у web-ui был прямой путь
+наружу через `egress` — добавлена сеть `wan` (в ней только squid).
+Коммиты сессии: `86b69e6..7e02505`.
+
+**Точка входа следующей сессии:** человек прогоняет
+`docs/server-test-checklist.md` на сервере и приносит результаты (особенно
+раздел D: `ipc: host`, `NET_RAW`) и красные пункты с логам. План после
+зелёного прогона — каркас фазы 2: `compose.public.yaml` + waf-firewall
+(Caddy+Coraza, TLS ai.dda2543.ru). Открытых вопросов нет.
+

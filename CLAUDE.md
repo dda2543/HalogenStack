@@ -50,6 +50,21 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 - Учётные записи Open WebUI — для **внешних** пользователей, в т.ч. из
   интернета. auth-provider их не касается: WebUI ходит в LLM одним сервисным
   ключом.
+- LLM API доступен **только через reverse-proxy** с проверкой ключа через
+  auth-provider (forward-auth, подтверждено). `halogen-flash-server` и
+  `internal-auth-provider` не имеют портов на хосте: из интернета и напрямую
+  недоступны.
+- Публичный вход: `https://ai.dda2543.ru` → `waf-firewall` (TLS-терминация +
+  CRS). Сертификат — certbot на хосте через `make`. **DNS-запись ai.dda2543.ru
+  ещё не создана** — предпосылка публичного запуска.
+- Scope WAF — только публичный путь WebUI (LAN-путь агентов без WAF).
+- Механизм auth-provider (подтверждён): reverse-proxy → forward-auth к
+  auth-provider на каждый запрос; ключи в файлах хоста, перечитывание по
+  сигналу/таймеру.
+- LAN-путь агентов: **HTTP (решение для MVP)**; переход на self-signed TLS —
+  в roadmap (§9).
+- Whitelist доменов WebUI: **изначально пуст**; в документации — пример
+  добавления php.net.
 
 ## 2. Режим работы
 
@@ -130,15 +145,26 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 
 ## 7. Открытые вопросы к человеку
 
-1. Выставляется ли LLM API в интернет, или **только в LAN** (агенты из LAN)?
-   Рекомендую только LAN — из интернета доступен лишь WebUI через waf-firewall.
-2. TLS для публичного входа WebUI: домен + сертификат. Получение — certbot на
-   хосте через `make` (вне стека) и монтирование в waf-firewall?
-3. Механизм auth-provider: reverse-proxy делает forward-auth к auth-provider
-   на каждый запрос агента; ключи в файлах, auth-provider перечитывает по
-   сигналу/таймеру. Подтвердить.
-4. Scope WAF: только публичный путь WebUI, или также LAN-путь агентов?
-   Рекомендую только WebUI: CRS на JSON с кодом/промптами даёт ложные
-   срабатывания и может ломать SSE-стриминг.
-5. Стартовый whitelist доменов для WebUI (редактируется через make).
-6. LAN-путь агентов: HTTP или self-signed TLS?
+1. **`egress-proxy` как 6-й сервис** — не подтверждено (§6.8). Без него цель 6
+   для WebUI невыполнима.
+2. **Выбор ПО reverse-proxy и waf-firewall.** Рекомендация: Caddy в обоих
+   (waf = caddy+coraza, reverse-proxy = чистый caddy с `forward_auth`) —
+   одна технология, два конфига. Альтернатива: nginx (+ModSecurity).
+3. **Хранение upstream-ключа `HALOGEN_API_KEY`** — предложение: файл на хосте,
+   монтируется только в reverse-proxy. Подтвердить.
+4. **DNS-запись ai.dda2543.ru** — задача человека перед публичным запуском.
+
+## 8. Соглашения
+
+- Факты в документации сопровождать ссылкой на файл-источник (`/docs/...` или `src/...`).
+- Сетевые обращения — только через `HTTP_PROXY` (уже выставлен).
+- Не трогать `settings.json`, `squid.conf`/`squid.d/` (см. `/docs/CLAUDE.md` §2).
+
+## 9. Roadmap (после MVP)
+
+- Перевод LAN-пути агентов с HTTP на self-signed TLS (решение MVP — HTTP, §1.2).
+- Стек мониторинга: metrics-waf, node-exporter, blackbox-exporter, prometheus,
+  grafana — возможно, на отдельном хосте; сети проектировать с запасом под него.
+- Публичный запуск WebUI требует: DNS-запись ai.dda2543.ru → IP сервера,
+  certbot на хосте (через make), затем включение публичного входа.
+- Единый вход в Open WebUI через auth-provider (OIDC) — если потребуется.

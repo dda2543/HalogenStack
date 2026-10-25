@@ -67,5 +67,8 @@
 ## Документация
 
 Рабочий документ проекта (решения, противоречия, соглашения) — [CLAUDE.md](CLAUDE.md).
-Архитектура — [docs/architecture.md](docs/architecture.md).
-Административные руководства (ключи, ACL, whitelist) — `docs/` (в процессе).
+
+- [docs/architecture.md](docs/architecture.md) — канон архитектуры.
+- [docs/admin-keys.md](docs/admin-keys.md) — ключи пользователей (`make key-*`).
+- [docs/admin-whitelist.md](docs/admin-whitelist.md) — whitelist WebUI (`make whitelist-*`).
+- [docs/server-test-checklist.md](docs/server-test-checklist.md) — прогон на сервере перед тем, как считать фазу 1 зелёной.

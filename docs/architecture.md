@@ -44,12 +44,15 @@
 | Сеть | internal (без шлюза) | Участники |
 |---|---|---|
 | `internal` | да | halogen-flash-server, reverse-proxy, internal-auth-provider, web-ui |
-| `egress` | нет (единственный шлюз наружу) | web-ui, egress-proxy |
+| `egress` | да | web-ui, egress-proxy |
+| `wan` | нет — единственный шлюз наружу | egress-proxy |
 | `public` | да | waf-firewall, reverse-proxy (фаза 2) |
 
 Ровно два проброса на хост: `LAN_IP:8731` (reverse-proxy, агенты) и
 `0.0.0.0:443` (waf-firewall, фаза 2). `egress-proxy` — единственный
-контейнер с маршрутом в интернет.
+контейнер, состоящий в `wan`, то есть единственный с маршрутом в интернет;
+у web-ui прямого пути наружу нет физически (обе его сети — internal), весь
+исходящий трафик идёт через squid по `HTTP_PROXY`.
 
 ## 4. Пути запросов
 

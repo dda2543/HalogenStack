@@ -153,8 +153,12 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 Архитектура зафиксирована: **`docs/architecture.md`** (канон).
 Каркас фазы 1 создан 2026-10-25 (`compose.yaml`, Caddyfile, squid.conf,
 auth-provider, Makefile, примеры env/secrets); смоук-тест auth-provider в
-контейнере агента — 6/6 PASS. Ожидает: проверка на сервере (чек-лист
-architecture.md §7), admin-руководства в `docs/`, каркас фазы 2.
+контейнере агента — 6/6 PASS. Admin-руководства написаны: `docs/admin-keys.md`,
+`docs/admin-whitelist.md`, `docs/server-test-checklist.md`. При подготовке
+доков исправлен дефект каркаса: у web-ui появился бы прямой путь наружу через
+сеть `egress` — теперь `egress` тоже `internal: true`, а squid выходит в мир
+через отдельную сеть `wan` (единственный контейнер в ней). Ожидает: прогон
+чек-листа на сервере, каркас фазы 2.
 
 ## 8. Соглашения
 

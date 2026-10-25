@@ -6,7 +6,9 @@ networks:
   internal:
     internal: true   # без шлюза: участники не имеют выхода в интернет
   egress:
-    driver: bridge   # единственная сеть со шлюзом наружу (через egress-proxy)
+    internal: true   # web-ui <-> egress-proxy, без шлюза: у web-ui нет прямого пути наружу
+  wan:
+    driver: bridge   # единственная сеть со шлюзом наружу; в ней только egress-proxy
 
 volumes:
   caddy_data:
@@ -106,7 +108,7 @@ services:
     image: docker.io/ubuntu/squid:6
     container_name: halogen-egress-proxy
     restart: unless-stopped
-    networks: [egress]   # только egress: в internal её нет
+    networks: [egress, wan]   # единственный контейнер с маршрутом в интернет (wan)
     volumes:
       - ./config/squid/squid.conf:/etc/squid/squid.conf:ro,z
       - ./config/squid/whitelist.txt:/etc/squid/whitelist.txt:ro,z

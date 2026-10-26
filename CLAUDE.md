@@ -222,12 +222,18 @@ Makefile) и все руководства (`docs/admin-*.md`, `docs/server-test
 Образ egress-proxy запинен по digest `sha256:6a097f68…` (LTS noble, squid 6.6)
 вместо мутабельного тега. Доки: исправлен устаревший факт §5 (порт), коммит
 `b3a70dd`; права ключей —
-§5 + `docs/admin-keys.md`. Коммиты сессии: `b3a70dd..` (см. git log).
+§5 + `docs/admin-keys.md`. **Проверено на сервере (зелёный прогон):** все 5
+контейнеров Up, squid держится (реальная причина `Exited(1)` — необъявленный
+`safe_ports`, не regex: догадку про несколько inline-regex в `rep_header`
+отбрасываем — squid 6.6 их принимает); auth-provider читает 4 ключа (`user:0:0`
+подтверждён); сквозной authz: без ключа и с bogus → 401, с валидным → 200
+(отдаётся модель `halogen-qwen3.8-flash-next`). Коммиты сессии: `b3a70dd..`
+(см. git log).
 
-**Точка входа следующей сессии:** (1) `podman logs halogen-egress-proxy` →
-починить squid (главный подозреваемый — `rep_header` с несколькими inline-regex
-в одной строке); (2) проверить на сервере права ключей после фикса (`make up` →
-в логах auth-provider «keys.acl перечитан: N», не ошибка) и `make key-rotate`;
-(3) разматчить Caddy `/healthz` ↔ halogen `/health`. После зелёного прогона —
-каркас фазы 2 (`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
+**Точка входа следующей сессии:** (1) подключить Claude Code к halogen — клиент
+пишет «модель не существует / нет доступа», хотя `/v1/models` отдаёт 200;
+проверить `/v1/messages` напрямую и env `ANTHROPIC_MODEL` /
+`ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_BASE_URL` (без суффикса `/v1`);
+(2) разматчить Caddy `/healthz` ↔ halogen `/health`. После — каркас фазы 2
+(`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
 

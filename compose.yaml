@@ -112,7 +112,10 @@ services:
       - webui_data:/app/backend/data
 
   egress-proxy:
-    image: docker.io/ubuntu/squid:6.6-24.04_beta
+    # Пин по digest: тег 6.6-24.04_beta мутабелен (Canonical пересобирает с
+    # патчами). Bump: skopeo inspect docker://docker.io/ubuntu/squid:6.6-24.04_beta
+    # → новый Digest → сюда → тест на сервере. База — Ubuntu LTS noble, squid 6.6.
+    image: docker.io/ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029  # 6.6-24.04_beta (amd64)
     container_name: halogen-egress-proxy
     restart: unless-stopped
     networks: [egress, wan]   # единственный контейнер с маршрутом в интернет (wan)

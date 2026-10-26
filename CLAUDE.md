@@ -211,21 +211,23 @@ Makefile) и все руководства (`docs/admin-*.md`, `docs/server-test
 запроса всегда ложен → резалось всё). auth-provider не читал ключи — обход
 `podman unshare chown 1000:1000 ./secrets/keys.acl`. Итог: 4/5 контейнеров Up;
 **egress-proxy (squid) — `Exited(1)`, не поднят**. Ревью: перенос `rep_header` и
-`safe_ports` — верные фиксы реальных багов каркаса. Расхождения: пин squid на
-`_beta`-тег хрупкий (лучше `:stable`/digest); флаг `U` — костыль (рекурсивно
+`safe_ports` — верные фиксы реальных багов каркаса. Расхождения: тег squid
+мутабелен (а тегов `:6`/`:stable`, как я ошибочно предполагал, вообще нет —
+схема Canonical `<ver>-<ubuntu>_{beta,edge}`); флаг `U` — костыль (рекурсивно
 меняет владельца файла на хосте, ключ перестал принадлежать пользователю).
 **Исправлено в сессии 2:** `internal-auth-provider` запускается `user: "0:0"`
 (rootless uid 0 = хост-админ читает 0600 `keys.acl`), `U` снят;
 `keys.acl.example` стал комментариев (key-add не сталкивается с заглушками);
 добавлен `make key-rotate` (перевыпуск значения) — требует проверки на сервере.
-Доки: исправлен устаревший факт §5 (порт), коммит `b3a70dd`; права ключей —
+Образ egress-proxy запинен по digest `sha256:6a097f68…` (LTS noble, squid 6.6)
+вместо мутабельного тега. Доки: исправлен устаревший факт §5 (порт), коммит
+`b3a70dd`; права ключей —
 §5 + `docs/admin-keys.md`. Коммиты сессии: `b3a70dd..` (см. git log).
 
 **Точка входа следующей сессии:** (1) `podman logs halogen-egress-proxy` →
 починить squid (главный подозреваемый — `rep_header` с несколькими inline-regex
 в одной строке); (2) проверить на сервере права ключей после фикса (`make up` →
 в логах auth-provider «keys.acl перечитан: N», не ошибка) и `make key-rotate`;
-(3) разматчить Caddy `/healthz` ↔ halogen `/health`; (4) перепиннить squid на
-стабильный тег. После зелёного прогона — каркас фазы 2 (`compose.public.yaml` +
-waf-firewall, TLS ai.dda2543.ru).
+(3) разматчить Caddy `/healthz` ↔ halogen `/health`. После зелёного прогона —
+каркас фазы 2 (`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
 

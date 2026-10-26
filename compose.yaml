@@ -61,7 +61,7 @@ services:
       # bind только на LAN-интерфейс (агенты); НЕ 0.0.0.0 — см. тест-чек §7.
       - "${LAN_IP}:8731:8080"
     volumes:
-      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro:z
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

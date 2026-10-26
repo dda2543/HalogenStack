@@ -105,7 +105,7 @@ services:
       - webui_data:/app/backend/data
 
   egress-proxy:
-    image: docker.io/ubuntu/squid:6
+    image: docker.io/ubuntu/squid:6.6-24.04_beta
     container_name: halogen-egress-proxy
     restart: unless-stopped
     networks: [egress, wan]   # единственный контейнер с маршрутом в интернет (wan)

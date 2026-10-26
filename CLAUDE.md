@@ -71,8 +71,14 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 - Механизм auth-provider (подтверждён): reverse-proxy → forward-auth к
   auth-provider на каждый запрос; ключи в файлах хоста, перечитывание по
   сигналу/таймеру.
-- LAN-путь агентов: **HTTP (решение для MVP)**; переход на self-signed TLS —
-  в roadmap (§9).
+- Путь агентов (решение 2026-10-26, заменило «HTTP в LAN» и «self-signed TLS»):
+  **WireGuard на сервере + VLAN-containment на роутере**. `8731` биндится на
+  туннельный адрес (`LAN_IP=10.80.0.1`), в LAN слушателя нет; из интернета
+  проброшены только 443 и 80 (ACME). Два слоя ключей (пир WG + `keys.acl`) —
+  осознанно. Документация: `docs/admin-router-mikrotik.md`,
+  `docs/admin-server-ubuntu.md`, `docs/admin-client-macos.md`; канон —
+  `docs/architecture.md` §3.1. Реализация — вне репозитория (роутер и хост),
+  агент к ней не причастен.
 - Whitelist доменов WebUI: **изначально пуст**; в документации — пример
   добавления php.net.
 - web-ui запускается с `OFFLINE_MODE: "true"` (решение 2026-10-26): эмбеддинги с
@@ -209,7 +215,9 @@ auth-provider, Makefile, примеры env/secrets); смоук-тест auth-p
 
 ## 9. Roadmap (после MVP)
 
-- Перевод LAN-пути агентов с HTTP на self-signed TLS (решение MVP — HTTP, §1.2).
+- Внедрение пути агентов по §1.2: WG на сервере + VLAN на MikroTik (доки
+  `admin-router-mikrotik.md` / `admin-server-ubuntu.md` / `admin-client-macos.md`),
+  затем смена `LAN_IP` в `.env` на `10.80.0.1` и проверка чек-листа §Б.
 - Стек мониторинга: metrics-waf, node-exporter, blackbox-exporter, prometheus,
   grafana — возможно, на отдельном хосте; сети проектировать с запасом под него.
 - Публичный запуск WebUI требует: DNS-запись ai.dda2543.ru → IP сервера,
@@ -326,6 +334,16 @@ CERTS_DIR), `docs/admin-public.md`, чек-лист §Е. Правки фазы 
 имена сетей выводятся через `podman network ls` (разделитель зависит от версии
 podman-compose), а пункт E про `/healthz` переформулирован как **решение**
 (сейчас версия halogen доступна из интернета).
+
+**Сегментация сети (решение человека, та же сессия).** Выбран «идеальный путь»:
+WireGuard на сервере (путь агентов, `8731` только на туннельном адресе) +
+VLAN-containment на MikroTik (сервер вне LAN, из интернета только 443 и 80).
+Два слоя ключей приняты сознательно. Написаны три эксплуатационных документа:
+`docs/admin-router-mikrotik.md`, `docs/admin-server-ubuntu.md`,
+`docs/admin-client-macos.md`; канон дополнен §3.1, roadmap §9 переписан (пункт
+«self-signed TLS для LAN» заменён на WG). Ничего из этого не проверялось агентом
+(нет доступа ни к роутеру, ни к хосту) — синтаксис RouterOS, пути Homebrew и
+номера адресов сверять на месте.
 
 **Точка входа следующей сессии:** (1) рестарт web-ui → чек-лист §C (чистый лог
 после OFFLINE_MODE); (2) предпосылки фазы 2 на хосте — DNS `ai.dda2543.ru`,

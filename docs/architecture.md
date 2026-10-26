@@ -13,8 +13,8 @@
                           │ waf-firewall │  Caddy + Coraza (CRS)
                           └──────┬───────┘  сеть: public
  LAN (2 ноутбука)                │
-   агенты ──8731/tcp──▶ ┌────────▼────────┐
-   (HTTP, MVP)          │  reverse-proxy  │  Caddy (forward_auth)
+   агенты ─WireGuard─▶ ┌────────▼────────┐
+   (туннель, §3.1)     │  reverse-proxy  │  Caddy (forward_auth)
                         └───┬──────────┬──┘  сети: public + internal
               forward-auth  │          │
                  ┌──────────┘          │
@@ -54,10 +54,28 @@
 у web-ui прямого пути наружу нет физически (обе его сети — internal), весь
 исходящий трафик идёт через squid по `HTTP_PROXY`.
 
+### 3.1 Внешняя сегментация (решение 2026-10-26)
+
+Хост стека отделён от основной LAN и не имеет в неё маршрута; путь агентов
+шифруется. Два независимых механизма, они закрывают разные дыры:
+
+- **VLAN на роутере (MikroTik)** — containment: сервер в `10.20.0.0/24`, доступ
+  «сервер → LAN» запрещён, из интернета проброшены только `443` (WebUI) и `80`
+  (ACME-выпуск). Не шифрует ничего.
+- **WireGuard на сервере** — путь агентов: `8731` биндится на туннельный адрес
+  (`LAN_IP=10.80.0.1`), в LAN слушателя нет вовсе; персональные ключи едут
+  внутри туннеля, а не открытым HTTP. Не изолирует скомпрометированный хост.
+
+Порт `8731` наружу не публикуется. Два слоя учётных данных (ключ пира WG +
+персональный ключ из `keys.acl`) — осознанно: отзыв доступа требует обоих шагов.
+Конкретика: `docs/admin-router-mikrotik.md`, `docs/admin-server-ubuntu.md`,
+`docs/admin-client-macos.md`.
+
 ## 4. Пути запросов
 
-1. **Агент (LAN):** агент → `http://LAN_IP:8731/v1|v1/messages` с
-   `Authorization: Bearer <персональный ключ>` → reverse-proxy делает
+1. **Агент:** агент → WireGuard-туннель → `http://10.80.0.1:8731/v1|v1/messages`
+   с `Authorization: Bearer <персональный ключ>` (HTTP внутри туннеля WG,
+   §3.1) → reverse-proxy делает
    forward-auth запрос к internal-auth-provider (тот сверяет ключ с файлами
    хоста) → при 200 reverse-proxy → halogen-flash-server. В MVP halogen работает
    без собственного ключа (roadmap: включить `HALOGEN_API_KEY`).
@@ -115,6 +133,7 @@
 
 ## 8. Roadmap (детали: CLAUDE.md §9)
 
-self-signed TLS для LAN-пути агентов → `HALOGEN_API_KEY` на halogen →
+WireGuard-туннель для пути агентов + VLAN-containment (решение принято,
+реализация — вне репозитория, см. §3.1) → `HALOGEN_API_KEY` на halogen →
 мониторинг (metrics-waf, node-exporter, blackbox-exporter, prometheus,
 grafana) → опционально OIDC для Open WebUI.

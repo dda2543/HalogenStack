@@ -5,11 +5,11 @@ SECRETS_DIR ?= ./secrets
 KEYS      := $(SECRETS_DIR)/keys.acl
 WHITELIST := config/squid/whitelist.txt
 
-.PHONY: init up down build logs ps key-add key-rm key-list whitelist-add whitelist-rm whitelist-list
+.PHONY: init up down build logs ps key-add key-rotate key-rm key-list whitelist-add whitelist-rm whitelist-list
 
-init: ## создать secrets/keys.acl и .env из примеров
-	@test -f $(KEYS) || (install -m 600 secrets/keys.acl.example $(KEYS) && echo "создан $(KEYS): замените ключи-заглушки через key-add/key-rm")
-	@test -f .env || (cp .env.example .env && echo "создан .env: заполните значения")
+init: ## создать пустой secrets/keys.acl и .env из примеров
+	@test -f $(KEYS) || (install -m 600 secrets/keys.acl.example $(KEYS) && echo "создан $(KEYS) (пустой): добавьте ключи — make key-add NAME=...")
+	@test -f .env || (cp .env.example .env && echo "создан .env: заполните LAN_IP, каталоги, ключи")
 
 up: ## поднять стек (build + up -d)
 	$(COMPOSE) -f compose.yaml up -d --build
@@ -24,12 +24,23 @@ ps: ## статус контейнеров
 
 # --- Ключи пользователей (auth-provider перечитывает keys.acl по mtime) ---
 
-key-add: ## make key-add NAME=agent1
+key-add: ## make key-add NAME=agent1 (новая запись; для смены значения — key-rotate)
 	@test -n "$(NAME)" || { echo "использование: make key-add NAME=<имя>"; exit 1; }
-	@if grep -q '^$(NAME):' $(KEYS) 2>/dev/null; then echo "ключ '$(NAME)' уже есть"; exit 1; fi
+	@if grep -q '^$(NAME):' $(KEYS) 2>/dev/null; then \
+	  echo "ключ '$(NAME)' уже есть — новое значение: make key-rotate NAME=$(NAME)"; exit 1; \
+	fi
 	@KEY=$$(openssl rand -hex 32); \
-	echo "$(NAME):$$KEY" >> $(KEYS); chmod 600 $(KEYS); \
+	printf '%s:%s\n' "$(NAME)" "$$KEY" >> $(KEYS); chmod 600 $(KEYS); \
 	echo "Добавлен ключ '$(NAME)' (показывается один раз): $$KEY"
+
+key-rotate: ## make key-rotate NAME=agent1 (перевыпустить значение существующего ключа)
+	@test -n "$(NAME)" || { echo "использование: make key-rotate NAME=<имя>"; exit 1; }
+	@grep -q '^$(NAME):' $(KEYS) 2>/dev/null || { echo "ключа '$(NAME)' нет — добавьте: make key-add NAME=$(NAME)"; exit 1; }
+	@KEY=$$(openssl rand -hex 32); \
+	grep -v '^$(NAME):' $(KEYS) > $(KEYS).tmp && \
+	printf '%s:%s\n' "$(NAME)" "$$KEY" >> $(KEYS).tmp && \
+	mv $(KEYS).tmp $(KEYS) && chmod 600 $(KEYS); \
+	echo "Ключ '$(NAME)' перевыпущен (показывается один раз): $$KEY"
 
 key-rm: ## make key-rm NAME=agent1
 	@test -n "$(NAME)" || { echo "использование: make key-rm NAME=<имя>"; exit 1; }

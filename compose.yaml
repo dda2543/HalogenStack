@@ -75,11 +75,18 @@ services:
     restart: unless-stopped
     networks: [internal]
     # Портов на хосте нет: его спрашивает только reverse-proxy (forward_auth).
+    # rootless podman: uid 0 в контейнере = uid администратора хоста, поэтому
+    # процесс читает host-файл keys.acl (0600, владелец — админ) без chown и без
+    # флага монтирования U (U переставлял владельца на подuid — файл переставал
+    # принадлежать админу и читался лишь через `podman unshare`). read_only /
+    # cap_drop / no-new-privileges в силе; «root» здесь — непривилегированный
+    # пользователь хоста, не настоящий root.
+    user: "0:0"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     volumes:
-      - ${SECRETS_DIR:-./secrets}/keys.acl:/etc/auth-provider/keys.acl:ro,z,U
+      - ${SECRETS_DIR:-./secrets}/keys.acl:/etc/auth-provider/keys.acl:ro,z
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

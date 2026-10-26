@@ -191,6 +191,11 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 7. **`ipc: host` в проверенном compose** делит IPC-namespace хоста — против
    цели 5. Проверить на сервере: ROCm с приватным IPC + `shm_size` вместо
    `ipc: host`; заодно — нужна ли ещё `NET_RAW`.
+8. **SELinux vs Ubuntu.** §5 утверждает «SELinux-enforcing хост» (выведено из
+   флага `:z` в проверенном `reference/compose.yaml`), но сервер LLM — Ubuntu
+   (по умолчанию AppArmor, не SELinux). Уточнить у человека: если SELinux нет,
+   флаги `,z`/`:z` в монтированиях — безвредная лишняя запись, а пункт чек-листа
+   §Б про `ausearch -m avc` надо убрать. До ответа ничего не менять.
 
 ## 7. Открытые вопросы к человеку
 
@@ -345,9 +350,32 @@ VLAN-containment на MikroTik (сервер вне LAN, из интернета
 (нет доступа ни к роутеру, ни к хосту) — синтаксис RouterOS, пути Homebrew и
 номера адресов сверять на месте.
 
-**Точка входа следующей сессии:** (1) рестарт web-ui → чек-лист §C (чистый лог
-после OFFLINE_MODE); (2) предпосылки фазы 2 на хосте — DNS `ai.dda2543.ru`,
-`net.ipv4.ip_unprivileged_port_start=0`, certbot — затем прогон чек-листа §Е
-начиная с `make waf-build` (ждать ошибок по версиям ARG и синтаксису `seclang`);
-(3) после зелёного §Е — переключение Coraza `DetectionOnly` → `On`.
+**Коммиты сессии 3:** `45ec61a` (фикс query-строк), `77c2d66`, `54a587c`,
+`01ca233` (`/healthz`→`/health`), `e9442a8` (OFFLINE_MODE), `175c20e` (каркас
+фазы 2), `04cba30` (актуализация чек-листа), `0769d9b` (доки по сегментации сети).
+
+**Точка входа следующей сессии (2026-10-27).** Порядок — от дешёвого к дорогому:
+
+1. Рестарт web-ui после `OFFLINE_MODE` → чек-лист §C (в логе не должно быть
+   `ProxyError|SentenceTransformer`). Заодно `make key-rotate` — он ни разу не
+   проверялся.
+2. Фаза 2, чек-лист §Е: предпосылки (DNS `ai.dda2543.ru`,
+   `net.ipv4.ip_unprivileged_port_start=0`, certbot), затем `make waf-build`.
+   Ждать ошибок в двух местах: версии `CORAZA_CADDY_VERSION=latest` /
+   `CRS_VERSION=v4.4.0` в `waf/Dockerfile` и синтаксис блока `seclang` —
+   каркас писался без `caddy validate`. После сборки зафиксировать версии.
+3. Решение по `/healthz` наружу (сейчас публично видна версия halogen) —
+   закрыть или оставить, зафиксировать в §1.2.
+4. Сегментация по новым документам: VLAN на MikroTik → WG на сервере → смена
+   `LAN_IP` на `10.80.0.1` → чек-лист §Б. Открытый вопрос: оставить ли проброс
+   :80 под `certbot --standalone` или перевыпустить `make cert` на DNS-01
+   (тогда правило :80 из доков уходит).
+5. Мелочь, отложенная осознанно: `PUBLIC_BIND_IP` в `.env`, чтобы 443 не
+   публиковался на `0.0.0.0` (актуально после появления VLAN).
+
+**Контекст для агенту:** git в контейнере — только через
+`GIT_CONFIG_GLOBAL=/tmp/gitconfig` и `-c safe.directory=/workspace/src`
+(`/home/agent` read-only, `.git` принадлежит root); `chmod` запрещён, скрипты
+вызывать через `sh`. Факты о Caddy — из локальных исходников `/docs/caddy`
+(сети для GitHub нет).
 

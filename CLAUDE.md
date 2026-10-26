@@ -262,6 +262,19 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 Неизвестно также, терпит ли сам halogen query-параметры на `/v1/*` — исходников
 нет в `/docs`, проверить `curl`-ом на сервере.
 
+**Проверено на сервере (подтверждение фикса query-строк):**
+`GET /v1/models?` с валидным ключом → 200. Дефект закрыт.
+Два наблюдения из того же прогона:
+- `GET /health` на порту прокси даёт 200 **не от halogen**: `/health` не матчится
+  ни с `@health (/healthz)`, ни с `@api`, и уходит в catch-all `handle` → web-ui
+  (его `/health` и отвечает). Разматч `/healthz` ↔ `/health` остаётся открытым.
+- web-ui при старте: `httpx.ProxyError: 403 Forbidden` →
+  `Error loading SentenceTransformer: 403` — это **наш egress работает**: Open WebUI
+  тянет дефолтный `RAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`
+  с HuggingFace (`/docs/open-webui/backend/open_webui/config.py:1015`), squid
+  режет пустым whitelist. Правильного обхода нет (качать бинарники через наш
+  allowlist Content-Type всё равно нельзя) — см. точку входа: `OFFLINE_MODE=true`.
+
 **Дополнено (та же сессия):** пункт «подключить Claude Code к halogen» закрыт
 пользователем — агент работает с LLM через `HALOGEN_BASE_URL` (переключено на
 разрабатываемую версию движка), проблема подключения устранена. Из shell-песочницы
@@ -269,10 +282,12 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 — рантайм Claude Code ходит в LLM сам. Сквозная проверка `/v1/models` через стек
 остаётся пунктом чек-листа §B на сервере.
 
-**Точка входа следующей сессии:** (1) прогнать на сервере фикс query-строк
-(чек-лист §B) и `podman exec halogen-reverse-proxy caddy validate
---config /etc/caddy/Caddyfile`; (2) разматчить Caddy `/healthz` ↔ halogen
-`/health` (Caddy проксирует `/healthz` как есть, у halogen открыт `/health` →
-сейчас 404). После — каркас фазы 2 (`compose.public.yaml` + waf-firewall,
-TLS ai.dda2543.ru).
+**Точка входа следующей сессии:** (1) web-ui в MVP без загрузчика моделей:
+`OFFLINE_MODE: "true"` в env web-ui (ставит `HF_HUB_OFFLINE=1` и выключает
+auto-update embedding/rerank/whisper и проверку версий —
+`/docs/open-webui/backend/open_webui/env.py:1225`); решение о RAG (монтировать
+кэш HF в образ или RAG не включать) принимает человек. (2) разматчить Caddy
+`/healthz` ↔ halogen `/health` (Caddy проксирует `/healthz` как есть, у halogen
+открыт `/health` → сейчас 404). После — каркас фазы 2 (`compose.public.yaml` +
+waf-firewall, TLS ai.dda2543.ru).
 

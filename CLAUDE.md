@@ -110,9 +110,13 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 ## 5. Установленные технические факты
 
 - `halogen-flash-server` — OpenAI-совместимый API + Anthropic-совместимый вход
-  (`x-api-key`), порт 8000 в контейнере. Требует GPU-устройства хоста:
-  `/dev/kfd`, `/dev/dri`, `ipc: host`, `memlock=-1`, группы video/render
-  (`group_add: keep-groups`). Источник: `/docs/compose.yaml`, README.
+  (`x-api-key`), слушает порт **8731** (по умолчанию; env `HALOGEN_API_PORT`).
+  Требует GPU-устройства хоста: `/dev/kfd`, `/dev/dri`, `ipc: host`, `memlock=-1`,
+  группы video/render (`group_add: keep-groups`). Источник:
+  `/docs/halogen-flash-server/docs/api.md:3`, `deploy/entrypoint.sh:27`
+  (`API_PORT=${HALOGEN_API_PORT:-8731}`). Внимание: в проверенном `/docs/compose.yaml`
+  стоит проброс `"8731:8000"`, но там `network_mode: host` — он игнорируется,
+  приложение слушает 8731 (отсюда ошибочные «8000» в ранних версиях этого дока).
 - **Аутентификация: ровно один ключ** `HALOGEN_API_KEY` (или `HALOGEN_API_KEY_FILE`).
   Без ключа — 401 на всех маршрутах кроме открытого `/health`.
   Источник: `docs/configuration.md:498+`, `docs/api.md:15`.

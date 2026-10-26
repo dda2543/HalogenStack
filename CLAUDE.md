@@ -59,6 +59,15 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   CRS). Сертификат — certbot на хосте через `make`. **DNS-запись ai.dda2543.ru
   ещё не создана** — предпосылка публичного запуска.
 - Scope WAF — только публичный путь WebUI (LAN-путь агентов без WAF).
+- Каркас фазы 2 (создан 2026-10-26, **на сервере не проверялся**):
+  `compose.public.yaml` (waf-firewall в сети `public`, порт хоста `443`→`8443`
+  в контейнере — без `CAP_NET_BIND_SERVICE`), `waf/Dockerfile` (Caddy+Coraza+CRS,
+  версии ARG — зафиксировать после первой сборки), `config/caddy/Caddyfile.waf`
+  (`SecRuleEngine DetectionOnly` на первый прогон), `make waf-build/public-up/
+  cert/cert-renew`, `docs/admin-public.md`, чек-лист §Е. Два решения: сертификат
+  через `certbot --standalone` (waf занимает только 443; редиректа HTTP→HTTPS
+  нет), и reverse-proxy отвечает `403` на `/v1/*` с публичным `Host` — LLM API
+  наружу не светится. Предпосылка на хосте: `net.ipv4.ip_unprivileged_port_start=0`.
 - Механизм auth-provider (подтверждён): reverse-proxy → forward-auth к
   auth-provider на каждый запрос; ключи в файлах хоста, перечитывание по
   сигналу/таймеру.
@@ -110,6 +119,7 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 | `/docs/halogen-flash-server/` | Репозиторий LLM-сервера: README, `docs/` (configuration.md, api.md, sessions.md, limits.md…), `docker-compose.yml`. |
 | `/docs/halogen-server/` | Родственный движок (Qwen3.8-27B, `ghcr.io/peonist-ai/halogen`). Не целевой компонент стека — справочный. |
 | `/docs/open-webui/` | WebUI (Open WebUI, форк-подобный upstream). Целевой компонент. |
+| `/docs/caddy/` | Исходники Caddy v2 — источник фактов о поведении `forward_auth`, матчеров и `rewrite` (сеть для поиска по GitHub недоступна). |
 
 ## 5. Установленные технические факты
 
@@ -298,8 +308,21 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 (`compose.yaml`, §1.2) — убирает стартовый `httpx.ProxyError: 403` и мёртвый
 RAG. Требует рестарта web-ui и проверки из чек-листа §C.
 
-**Точка входа следующей сессии:** (1) `make up` / рестарт web-ui → чек-лист §C
-(в логе web-ui не должно быть `ProxyError|SentenceTransformer`); (2) каркас
-фазы 2 — `compose.public.yaml` + `waf-firewall` (Caddy+Coraza), TLS
-ai.dda2543.ru (DNS-запись ещё не создана, certbot на хосте через make).
+**Каркас фазы 2 (конец сессии 3).** Создано: `compose.public.yaml`
+(waf-firewall, сеть `public`, `443`→`8443`, `read_only`+tmpfs, `cap_drop: ALL`,
+`user: "0:0"` под читаемость сертификатов 0600), `waf/Dockerfile`
+(Caddy+Coraza+CRS, версии в ARG — не проверены), `config/caddy/Caddyfile.waf`
+(TLS с файлов + Coraza в DetectionOnly), `scripts/cert-deploy.sh` (deploy-hook
+certbot → `CERTS_DIR` с владельцем-админом), цели `make waf-build / public-up /
+public-down / public-logs / cert / cert-renew`, `.env.example` (PUBLIC_DOMAIN,
+CERTS_DIR), `docs/admin-public.md`, чек-лист §Е. Правки фазы 1: сеть `public`
+объявлена в `compose.yaml`, reverse-proxy в неё подключён и получил
+`PUBLIC_DOMAIN`, в его Caddyfile добавлен `403` на `/v1/*` с публичным `Host`.
+Ничего из этого агент не запускал (нет podman/сети) — прогон §Е за человеком.
+
+**Точка входа следующей сессии:** (1) рестарт web-ui → чек-лист §C (чистый лог
+после OFFLINE_MODE); (2) предпосылки фазы 2 на хосте — DNS `ai.dda2543.ru`,
+`net.ipv4.ip_unprivileged_port_start=0`, certbot — затем прогон чек-листа §Е
+начиная с `make waf-build` (ждать ошибок по версиям ARG и синтаксису `seclang`);
+(3) после зелёного §Е — переключение Coraza `DetectionOnly` → `On`.
 

@@ -73,7 +73,33 @@
 - [ ] Open WebUI `HTTP_PROXY`/`NO_PROXY`: чат работает (запросы к
       reverse-proxy не идут через squid) — при проблемах расширить `NO_PROXY`.
 
-## Е. Что считать эталоном «зелёного» прогона
+## Е. Фаза 2 — публичный вход (только после зелёных A–C)
+
+Предпосылки и разбор отказов: `docs/admin-public.md`.
+
+- [ ] `sysctl net.ipv4.ip_unprivileged_port_start` = 0 (иначе публикация 443 в
+      rootless podman не поднимется).
+- [ ] `make waf-build` собирает образ; **записать фактические версии**
+      `coraza-caddy` и CRS и зафиксировать их в `waf/Dockerfile` (ARG).
+- [ ] `make cert CERT_EMAIL=...` выпускает сертификат; в `$(CERTS_DIR)` лежат
+      `fullchain.pem`+`privkey.pem` 0600, владелец — администратор хоста.
+- [ ] `make public-up` → `podman ps` показывает `halogen-waf` Up (healthy).
+- [ ] `podman exec halogen-waf caddy validate --config /etc/caddy/Caddyfile` — OK.
+- [ ] снаружи: `curl -s -o /dev/null -w '%{http_code}\n' https://ai.dda2543.ru/healthz` → 200.
+- [ ] LLM API снаружи закрыт: `https://ai.dda2543.ru/v1/models` (даже с валидным
+      ключом) → **403**, а не 200/401.
+- [ ] LAN-путь не пострадал: `http://LAN_IP:8731/v1/models` с ключом → 200.
+- [ ] SSE сквозь WAF: чат в WebUI через `https://ai.dda2543.ru` отвечает
+      стримингом (чанки постепенно, не пачкой).
+- [ ] waf не имеет выхода наружу: `podman exec halogen-waf cat /proc/net/route`
+      — маршрута по умолчанию нет (сеть `public` internal).
+- [ ] ложные срабатывания CRS разобраны (`make public-logs | grep -i coraza`),
+      `SecRuleEngine` переключён `DetectionOnly` → `On`, WebUI продолжает работать.
+- [ ] `make cert-renew` продлевает и перезапускает waf (`curl -v` показывает
+      новый `expire`).
+
+## Ж. Что считать эталоном «зелёного» прогона
 
 Все пункты A–C зелёные; D — с зафиксированными решениями (что включили обратно
-и почему). Результат прогона — комментарий к коммиту или апдейт этого файла.
+и почему); E — зелёные, если фаза 2 включена. Результат прогона — комментарий к
+коммиту или апдейт этого файла.

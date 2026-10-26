@@ -1,0 +1,53 @@
+# halogen-stack, фаза 2: публичный вход WebUI (https://ai.dda2543.ru).
+# Поднимается ВМЕСТЕ с compose.yaml — один проект, потому что waf-firewall
+# должен попасть в сеть `public`, объявленную в compose.yaml:
+#   make public-up    (= podman-compose -f compose.yaml -f compose.public.yaml up -d)
+#
+# Предпосылки (см. docs/admin-public.md):
+#   1) DNS-запись ai.dda2543.ru → IP сервера;
+#   2) сертификат: make cert CERT_EMAIL=...;
+#   3) rootless podman разрешен хост-порт <1024:
+#      sysctl net.ipv4.ip_unprivileged_port_start=0
+name: halogen-stack
+
+services:
+  waf-firewall:
+    # Caddy 2 + Coraza (CRS). Собирается на сервере: make waf-build.
+    build:
+      context: ./waf
+    image: halogen-waf:local
+    container_name: halogen-waf
+    restart: unless-stopped
+    # Только `public`: waf не должен видеть internal-сервисы (halogen, auth-provider).
+    networks: [public]
+    # rootless podman: uid 0 в контейнере = uid администратора хоста, поэтому
+    # процесс читает примонтированные сертификаты 0600 без chown и без флага `U`
+    # (тот же приём, что у internal-auth-provider).
+    user: "0:0"
+    ports:
+      # 443 на хосте → 8443 в контейнере: Caddy не нужен CAP_NET_BIND_SERVICE,
+      # `cap_drop: ALL` остаётся в силе.
+      - "0.0.0.0:443:8443"
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-ai.dda2543.ru}
+    volumes:
+      - ./config/caddy/Caddyfile.waf:/etc/caddy/Caddyfile:ro,z
+      - ${CERTS_DIR:-./secrets/certs}:/etc/caddy/certs:ro,z
+    # Caddy здесь ничего постоянного не пишет (ACME не занимается, сертификат —
+    # файлом), поэтому /data и /config — tmpfs: read_only не требует ни томов,
+    # ни прав на запись в дамп образа.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /data:size=32m,mode=1777
+      - /config:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Покрывает и синтаксис Caddyfile, и читаемость сертификатов.
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 1m
+      timeout: 15s
+      retries: 3
+    depends_on:
+      - reverse-proxy

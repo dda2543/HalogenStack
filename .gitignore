@@ -1,5 +1,8 @@
 .env
-secrets/keys.acl
+# Всё в secrets/ — секреты (keys.acl, certs/ от make cert); пример остаётся.
+secrets/*
+!secrets/keys.acl.example
+*.pem
 cache/
 data/
 *.tmp

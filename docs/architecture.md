@@ -37,7 +37,7 @@
 | internal-auth-provider | своя сборка (node) | internal | — |
 | web-ui | Open WebUI | internal, egress | — |
 | egress-proxy | squid | egress | — |
-| waf-firewall | Caddy 2 + Coraza (CRS) | public | `0.0.0.0:443` (фаза 2) |
+| waf-firewall | Caddy 2 + Coraza (CRS), своя сборка `waf/` | public | `0.0.0.0:443` → `8443` в контейнере (фаза 2) |
 
 ## 3. Сети podman
 
@@ -95,8 +95,14 @@
 - **Фаза 1 (MVP):** 5 сервисов без waf-firewall; агенты по HTTP в LAN;
   web-ui доступен из LAN через reverse-proxy; whitelist пуст (= наружу
   нельзя ни на какой домен).
-- **Фаза 2:** waf-firewall + DNS `ai.dda2543.ru` + certbot на хосте (make)
-  → публичный вход WebUI на 443.
+- **Фаза 2 (каркас создан 2026-10-26, на сервере ещё не проверялся):**
+  waf-firewall + DNS `ai.dda2543.ru` + certbot на хосте (make) → публичный вход
+  WebUI на 443. Детали: `compose.public.yaml`, `waf/Dockerfile`,
+  `config/caddy/Caddyfile.waf`, `docs/admin-public.md`. Два решения каркаса:
+  сертификат выпускается `certbot --standalone` (waf слушает только 443, поэтому
+  :80 свободен и для выпуска, и для продления; HTTP→HTTPS редиректа нет), и
+  reverse-proxy отклоняет `403` запросы к `/v1/*` с публичным `Host` — LLM API
+  в интернет не светится даже через WAF.
 
 ## 7. Что проверить тестами на сервере
 

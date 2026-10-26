@@ -52,6 +52,10 @@
       `curl -N http://LAN_IP:8731/v1/chat/completions -H "Authorization: Bearer <ключ>" -H 'content-type: application/json' -d '{"model":"<имя из /v1/models>","messages":[{"role":"user","content":"скажи 1..5"}],"stream":true}'`
 - [ ] Open WebUI: вход создаётся только админом (ENABLE_SIGNUP=false),
       чат через сервисный ключ отвечает.
+- [ ] web-ui не пытается качать модели (OFFLINE_MODE=true):
+      `podman logs --since 5m halogen-web-ui 2>&1 | grep -iE "proxyerror|SentenceTransformer"`
+      — пусто. (До OFFLINE_MODE здесь был `httpx.ProxyError: 403 Forbidden` —
+      это штатная работа egress, но шум и мёртвый RAG.)
 - [ ] whitelist: `make whitelist-add DOMAIN=php.net` → тесты из
       `admin-whitelist.md` (200 html / картинка отклонена / не-whitelist отклонён).
       `make whitelist-rm DOMAIN=php.net` → php.net снова отклонён.

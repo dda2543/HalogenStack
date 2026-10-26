@@ -104,6 +104,14 @@ services:
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY задаётся в .env}
       WEBUI_AUTH: "true"
       ENABLE_SIGNUP: "false"
+      # Open WebUI по умолчанию тянет с HuggingFace эмбеддинг-модель
+      # (RAG_EMBEDDING_MODEL=all-MiniLM-L6-v2) и проверяет новые версии — egress-proxy
+      # это режет (403), и это правильно: бинарники всё равно не пройдут проверку
+      # Content-Type в squid. OFFLINE_MODE ставит HF_HUB_OFFLINE=1 и выключает
+      # auto-update embedding/rerank/whisper и проверку версий
+      # (/docs/open-webui/backend/open_webui/env.py:1225). Цена: RAG-встраивания в
+      # MVP не работают; для RAG монтировать кэш HF отдельным томом (roadmap).
+      OFFLINE_MODE: "true"
       # Весь исходящий трафик — только через egress-proxy (whitelist+GET).
       HTTP_PROXY: http://egress-proxy:3128
       HTTPS_PROXY: http://egress-proxy:3128

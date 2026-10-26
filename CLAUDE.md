@@ -66,6 +66,10 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   в roadmap (§9).
 - Whitelist доменов WebUI: **изначально пуст**; в документации — пример
   добавления php.net.
+- web-ui запускается с `OFFLINE_MODE: "true"` (решение 2026-10-26): эмбеддинги с
+  HuggingFace не скачиваются (их всё равно режет egress), проверка версий
+  выключена. Следствие — RAG-встраивания в MVP не работают; возврат только через
+  монтирование готового кэша HF отдельным томом.
 - `egress-proxy` (squid) **одобрен** как 6-й сервис: единственный контейнер
   с маршрутом наружу; web-ui ходит через него по `HTTP_PROXY`.
 - ПО прокси **одобрено — Caddy дважды**: `waf-firewall` = Caddy+Coraza (CRS),
@@ -288,11 +292,14 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 что `/health` на порту прокси — это web-ui (catch-all), а halogen — только
 `/healthz`. **Требуется рестарт reverse-proxy + `caddy validate`.**
 
-**Точка входа следующей сессии:** (1) web-ui в MVP без загрузчика моделей:
-`OFFLINE_MODE: "true"` в env web-ui (ставит `HF_HUB_OFFLINE=1` и выключает
-auto-update embedding/rerank/whisper и проверку версий —
-`/docs/open-webui/backend/open_webui/env.py:1225`); решение о RAG (монтировать
-кэш HF в образ или RAG не включать) принимает человек. (2) проверить на сервере
-`/healthz` → 200 после рестарта прокси. После — каркас фазы 2
-(`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
+**Подтверждено на сервере:** `/healthz` → 200 после `rewrite /health`.
+
+**Добавлено (решение человека):** web-ui переведён на `OFFLINE_MODE: "true"`
+(`compose.yaml`, §1.2) — убирает стартовый `httpx.ProxyError: 403` и мёртвый
+RAG. Требует рестарта web-ui и проверки из чек-листа §C.
+
+**Точка входа следующей сессии:** (1) `make up` / рестарт web-ui → чек-лист §C
+(в логе web-ui не должно быть `ProxyError|SentenceTransformer`); (2) каркас
+фазы 2 — `compose.public.yaml` + `waf-firewall` (Caddy+Coraza), TLS
+ai.dda2543.ru (DNS-запись ещё не создана, certbot на хосте через make).
 

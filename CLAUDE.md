@@ -127,6 +127,12 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   кэш `./cache:/cache:z`. Источник: `/docs/compose.yaml`.
 - SELinux-enforcing хост (флаг `:z` в проверенном compose) — учитывать при
   монтированиях и при выборе mTLS/сокетов.
+- **`halogen-flash-server` 0.18.15 — FastAPI/uvicorn** (в логе — `Uvicorn running
+  on http://0.0.0.0:8731`, предупреждение `@app.on_event("startup")`), в access-логе
+  печатает полный request-target вместе с query (`"GET /v1/model?x=1" 404`).
+  404 в таком случае — от неизвестного пути, а не из-за query. Query на валидном
+  пути (`/v1/models?x=1`) на сервере ещё не проверялся. Источник: логи сервера,
+  сессия 3.
 - **Caddy `forward_auth` сохраняет query-строку исходного запроса.** Он реализован
   как `reverse_proxy` + `rewrite` на `uri`; `RawQuery` перезаписывается только если
   в самом `uri` есть `?` (`/docs/caddy/modules/caddyhttp/rewrite/rewrite.go:274`).
@@ -256,12 +262,17 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 Неизвестно также, терпит ли сам halogen query-параметры на `/v1/*` — исходников
 нет в `/docs`, проверить `curl`-ом на сервере.
 
+**Дополнено (та же сессия):** пункт «подключить Claude Code к halogen» закрыт
+пользователем — агент работает с LLM через `HALOGEN_BASE_URL` (переключено на
+разрабатываемую версию движка), проблема подключения устранена. Из shell-песочницы
+агента этот адрес недоступен намеренно (нет маршрута; наружу только `HTTP_PROXY`)
+— рантайм Claude Code ходит в LLM сам. Сквозная проверка `/v1/models` через стек
+остаётся пунктом чек-листа §B на сервере.
+
 **Точка входа следующей сессии:** (1) прогнать на сервере фикс query-строк
-(чек-лист §B) и `caddy validate`; (2) подключить Claude Code к halogen — клиент
-пишет «модель не существует / нет доступа», хотя `/v1/models` отдаёт 200:
-проверить `/v1/messages` напрямую и env `ANTHROPIC_MODEL` /
-`ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_BASE_URL` (без суффикса `/v1`,
-источник: `/docs/halogen-flash-server/docs/claude-code.md:8`);
-(3) разматчить Caddy `/healthz` ↔ halogen `/health`. После — каркас фазы 2
-(`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
+(чек-лист §B) и `podman exec halogen-reverse-proxy caddy validate
+--config /etc/caddy/Caddyfile`; (2) разматчить Caddy `/healthz` ↔ halogen
+`/health` (Caddy проксирует `/healthz` как есть, у halogen открыт `/health` →
+сейчас 404). После — каркас фазы 2 (`compose.public.yaml` + waf-firewall,
+TLS ai.dda2543.ru).
 

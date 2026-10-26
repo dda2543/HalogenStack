@@ -33,6 +33,10 @@
 - [ ] forward-auth работает:
       `curl -s -o /dev/null -w '%{http_code}\n' http://LAN_IP:8731/v1/models` → 401;
       с `-H "Authorization: Bearer <ключ>"` → 200.
+- [ ] Query-строка в URL не режется (регрессия: агенты шлют `/v1/...?` и
+      `?param=…`; раньше forward_auth передавал её на `/authz` → 404):
+      `curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer <ключ>" http://LAN_IP:8731/v1/models?` → 200;
+      с `?x=1` → 200; без ключа с `?x=1` → 401 (не 404!).
 - [ ] `/healthz` открыт: `curl -s http://LAN_IP:8731/healthz` → 200 (версию
       halogen видно — при публичном входе фазы 2 решим, закрыть ли).
 - [ ] squid: пустой whitelist → `podman exec halogen-web-ui python -c "import requests;requests.get('http://example.org',timeout=10)"` → ошибка.

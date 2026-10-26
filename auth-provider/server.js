@@ -49,8 +49,14 @@ function tokenFrom(req) {
 }
 
 http.createServer((req, res) => {
-  if (req.url === "/healthz") { res.writeHead(200); res.end("ok"); return; }
-  if (req.url !== "/authz") { res.writeHead(404); res.end(); return; }
+  // forward_auth (Caddy) переписывает запрос на /authz, но query-строку
+  // исходного запроса сохраняет: `POST /v1/messages?x=1` приходит сюда как
+  // `GET /authz?x=1` (см. /docs/caddy/modules/caddyhttp/rewrite/rewrite.go:
+  // RawQuery перезаписывается только если в uri есть '?').
+  // Сравниваем поэтому только путь.
+  const path = req.url.split("?", 1)[0];
+  if (path === "/healthz") { res.writeHead(200); res.end("ok"); return; }
+  if (path !== "/authz") { res.writeHead(404); res.end(); return; }
   reload();
   const token = tokenFrom(req);
   const ok = Boolean(token) && keys.some(k => constantTimeEq(k, token));

@@ -127,6 +127,16 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   кэш `./cache:/cache:z`. Источник: `/docs/compose.yaml`.
 - SELinux-enforcing хост (флаг `:z` в проверенном compose) — учитывать при
   монтированиях и при выборе mTLS/сокетов.
+- **Caddy `forward_auth` сохраняет query-строку исходного запроса.** Он реализован
+  как `reverse_proxy` + `rewrite` на `uri`; `RawQuery` перезаписывается только если
+  в самом `uri` есть `?` (`/docs/caddy/modules/caddyhttp/rewrite/rewrite.go:274`).
+  Значит `POST /v1/messages?x=1` приходит на auth-provider как `GET /authz?x=1`.
+  Лечится: `uri /authz?` (пустой `?` гасит query) + сравнение только пути в
+  auth-provider.
+- **Матчер `path` в Caddy видит только `r.URL.Path`, query игнорирует**
+  (`/docs/caddy/modules/caddyhttp/matchers.go:439`). `/v1/*` — это prefix-матч по
+  `/v1/` (`matchers.go:521`), поэтому голый `/v1` не матчится и проваливается в
+  соседний `handle` (к web-ui).
 - **rootless podman (на сервере):** uid 0 в контейнере = uid администратора
   хоста. Поэтому `internal-auth-provider` читает host-`keys.acl` (0600) через
   `user: "0:0"` в compose — без chown и без флага монтирования `U` (U
@@ -230,10 +240,28 @@ Makefile) и все руководства (`docs/admin-*.md`, `docs/server-test
 (отдаётся модель `halogen-qwen3.8-flash-next`). Коммиты сессии: `b3a70dd..`
 (см. git log).
 
-**Точка входа следующей сессии:** (1) подключить Claude Code к halogen — клиент
-пишет «модель не существует / нет доступа», хотя `/v1/models` отдаёт 200;
+**2026-10-26 (сессия 3).** Разобран дефект: агенты шлют на LLM URL с `?` и
+GET-параметрами. Причина — `forward_auth` переписывает запрос на `uri /authz`, но
+**сохраняет query-строку** исходного запроса (`rewrite.go:274`), а auth-provider
+сравнивал `req.url` со строкой `/authz` точно → `/authz?x=1` давал 404 → Caddy
+отдавал этот 404 клиенту (запрос «блокировался»). Голый хвостовой `?` (пустой
+query) не ломался: Go не пишет `?` при пустом `RawQuery`. **Исправлено:**
+auth-provider сравнивает только путь (`req.url.split("?",1)[0]`), в Caddyfile
+`uri /authz?` (явно гасит query на auth-запросе) и матчер `@api path /v1 /v1/*`
+(голый `/v1` не матчился `/v1/*` и проваливался к web-ui). Смоук-тест
+auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1`, многопарный query,
+401 без ключа с query, 404 на чужом пути). Факты — в §5. **Не проверено на
+сервере** (нет `caddy`/`podman` у агента): прогнать новый пункт чек-листа §B и
+`podman exec halogen-reverse-proxy caddy validate --config /etc/caddy/Caddyfile`.
+Неизвестно также, терпит ли сам halogen query-параметры на `/v1/*` — исходников
+нет в `/docs`, проверить `curl`-ом на сервере.
+
+**Точка входа следующей сессии:** (1) прогнать на сервере фикс query-строк
+(чек-лист §B) и `caddy validate`; (2) подключить Claude Code к halogen — клиент
+пишет «модель не существует / нет доступа», хотя `/v1/models` отдаёт 200:
 проверить `/v1/messages` напрямую и env `ANTHROPIC_MODEL` /
-`ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_BASE_URL` (без суффикса `/v1`);
-(2) разматчить Caddy `/healthz` ↔ halogen `/health`. После — каркас фазы 2
+`ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_BASE_URL` (без суффикса `/v1`,
+источник: `/docs/halogen-flash-server/docs/claude-code.md:8`);
+(3) разматчить Caddy `/healthz` ↔ halogen `/health`. После — каркас фазы 2
 (`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
 

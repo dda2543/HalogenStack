@@ -15,10 +15,14 @@
 		reverse_proxy halogen-flash-server:8731
 	}
 
-	@api path /v1/*
+	# /v1 без слэша — тоже API (иначе провалится в handle ниже, к web-ui).
+	@api path /v1 /v1/*
 	handle @api {
 		forward_auth internal-auth-provider:9000 {
-			uri /authz
+			# '?' в конце гасит query-строку: иначе Caddy передаёт её на /authz
+			# вместе с query исходного запроса (rewrite.go: RawQuery меняется
+			# только при наличии '?' в uri).
+			uri /authz?
 			copy_headers Authorization X-Api-Key
 		}
 		reverse_proxy halogen-flash-server:8731 {

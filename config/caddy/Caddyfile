@@ -12,6 +12,8 @@
 :8080 {
 	@health path /healthz
 	handle @health {
+		# у halogen открыт /health, а не /healthz — иначе 404 от uvicorn.
+		rewrite /health
 		reverse_proxy halogen-flash-server:8731
 	}
 

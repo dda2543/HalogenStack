@@ -39,6 +39,9 @@
       с `?x=1` → 200; без ключа с `?x=1` → 401 (не 404!).
 - [ ] `/healthz` открыт: `curl -s http://LAN_IP:8731/healthz` → 200 (версию
       halogen видно — при публичном входе фазы 2 решим, закрыть ли).
+      ВНИМАНИЕ: `/healthz` — это halogen (Caddy переписывает на `/health`),
+      а `/health` на том же порту — это web-ui (catch-all `handle`), не halogen.
+      Отличать по `Server:` в ответе: `uvicorn` vs web-ui.
 - [ ] squid: пустой whitelist → `podman exec halogen-web-ui python -c "import requests;requests.get('http://example.org',timeout=10)"` → ошибка.
 - [ ] SELinux: `sudo ausearch -m avc -ts boot | grep -i halogen` — пусто
       (или объяснить каждую запись).

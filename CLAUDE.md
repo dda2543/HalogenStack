@@ -282,12 +282,17 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 — рантайм Claude Code ходит в LLM сам. Сквозная проверка `/v1/models` через стек
 остаётся пунктом чек-листа §B на сервере.
 
+**Исправлено (та же сессия):** разматч `/healthz` ↔ halogen `/health` — в
+`handle @health` добавлен `rewrite /health` (подтверждено сервером: `/healthz`
+давал 404 от uvicorn с `Via: 1.1 Caddy`). Заодно в чек-листе §B зафиксировано,
+что `/health` на порту прокси — это web-ui (catch-all), а halogen — только
+`/healthz`. **Требуется рестарт reverse-proxy + `caddy validate`.**
+
 **Точка входа следующей сессии:** (1) web-ui в MVP без загрузчика моделей:
 `OFFLINE_MODE: "true"` в env web-ui (ставит `HF_HUB_OFFLINE=1` и выключает
 auto-update embedding/rerank/whisper и проверку версий —
 `/docs/open-webui/backend/open_webui/env.py:1225`); решение о RAG (монтировать
-кэш HF в образ или RAG не включать) принимает человек. (2) разматчить Caddy
-`/healthz` ↔ halogen `/health` (Caddy проксирует `/healthz` как есть, у halogen
-открыт `/health` → сейчас 404). После — каркас фазы 2 (`compose.public.yaml` +
-waf-firewall, TLS ai.dda2543.ru).
+кэш HF в образ или RAG не включать) принимает человек. (2) проверить на сервере
+`/healthz` → 200 после рестарта прокси. После — каркас фазы 2
+(`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
 

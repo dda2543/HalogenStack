@@ -127,6 +127,11 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   кэш `./cache:/cache:z`. Источник: `/docs/compose.yaml`.
 - SELinux-enforcing хост (флаг `:z` в проверенном compose) — учитывать при
   монтированиях и при выборе mTLS/сокетов.
+- **rootless podman (на сервере):** uid 0 в контейнере = uid администратора
+  хоста. Поэтому `internal-auth-provider` читает host-`keys.acl` (0600) через
+  `user: "0:0"` в compose — без chown и без флага монтирования `U` (U
+  переставлял владельца на подuid). Источник: `compose.yaml`
+  (internal-auth-provider) + маппинг uid в rootless podman.
 
 ## 6. Обнаруженные противоречия (к разрешению на этапе планирования)
 
@@ -208,14 +213,19 @@ Makefile) и все руководства (`docs/admin-*.md`, `docs/server-test
 **egress-proxy (squid) — `Exited(1)`, не поднят**. Ревью: перенос `rep_header` и
 `safe_ports` — верные фиксы реальных багов каркаса. Расхождения: пин squid на
 `_beta`-тег хрупкий (лучше `:stable`/digest); флаг `U` — костыль (рекурсивно
-меняет владельца файла на хосте, ключ перестал принадлежать пользователю) —
-настоящий фикс в `make init`/`key-add`. Доки: исправлен устаревший факт §5
-(порт), коммит `b3a70dd`. Коммиты сессии: `b3a70dd..` (см. git log).
+меняет владельца файла на хосте, ключ перестал принадлежать пользователю).
+**Исправлено в сессии 2:** `internal-auth-provider` запускается `user: "0:0"`
+(rootless uid 0 = хост-админ читает 0600 `keys.acl`), `U` снят;
+`keys.acl.example` стал комментариев (key-add не сталкивается с заглушками);
+добавлен `make key-rotate` (перевыпуск значения) — требует проверки на сервере.
+Доки: исправлен устаревший факт §5 (порт), коммит `b3a70dd`; права ключей —
+§5 + `docs/admin-keys.md`. Коммиты сессии: `b3a70dd..` (см. git log).
 
 **Точка входа следующей сессии:** (1) `podman logs halogen-egress-proxy` →
 починить squid (главный подозреваемый — `rep_header` с несколькими inline-regex
-в одной строке); (2) `make init`/`key-add` под права ключей вместо `U` +
-идемпотентность `key-add`; (3) разматчить Caddy `/healthz` ↔ halogen `/health`;
-(4) перепиннить squid на стабильный тег. После зелёного прогона — каркас фазы 2
-(`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
+в одной строке); (2) проверить на сервере права ключей после фикса (`make up` →
+в логах auth-provider «keys.acl перечитан: N», не ошибка) и `make key-rotate`;
+(3) разматчить Caddy `/healthz` ↔ halogen `/health`; (4) перепиннить squid на
+стабильный тег. После зелёного прогона — каркас фазы 2 (`compose.public.yaml` +
+waf-firewall, TLS ai.dda2543.ru).
 

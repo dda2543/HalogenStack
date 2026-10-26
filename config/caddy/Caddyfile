@@ -12,7 +12,7 @@
 :8080 {
 	@health path /healthz
 	handle @health {
-		reverse_proxy halogen-flash-server:8000
+		reverse_proxy halogen-flash-server:8731
 	}
 
 	@api path /v1/*
@@ -21,7 +21,7 @@
 			uri /authz
 			copy_headers Authorization X-Api-Key
 		}
-		reverse_proxy halogen-flash-server:8000 {
+		reverse_proxy halogen-flash-server:8731 {
 			flush_interval -1
 		}
 	}

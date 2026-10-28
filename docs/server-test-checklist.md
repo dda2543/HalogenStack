@@ -26,11 +26,15 @@ URL с `?` в curl **обязательно в кавычках** — иначе
   промптов 98.9–99.9% и 67–73 t/s;
 - A: `make key-rotate NAME=webui` отработал (значение выдаётся один раз).
   Внимание: после перевыпуска `webui` нужно вписать значение в `.env` и
-  `make up` — иначе web-ui шлёт старый ключ и получает 401 (`admin-keys.md`).
+  `make up` — иначе web-ui шлёт старый ключ и получает 401 (`admin-keys.md`);
+- C: чистый лог web-ui после рестарта с `OFFLINE_MODE` — ни `ProxyError`, ни
+  403; `all-MiniLM-L6-v2` грузится из тома `webui_data`, значит
+  RAG-встраивания **работуют** (см. §1.2 CLAUDE.md — прежняя формулировка была
+  неверна); 401 после перевыпуска ключа тоже нет.
 
 Не проверялось (новый код с 2026-10-26):
 
-- C: проверка чистого лога web-ui после `OFFLINE_MODE` (нужен рестарт web-ui);
+- C: цикл 401→200 на агентском ключе после `key-rotate`;
 - D: ни один эксперимент по ужесточению ещё не прогонялся;
 - E: вся фаза 2 — каркас написан без podman/сети, ни один пункт не проверялся.
 
@@ -115,13 +119,18 @@ URL с `?` в curl **обязательно в кавычках** — иначе
 - [ ] Open WebUI: вход создаётся только админом (ENABLE_SIGNUP=false),
       чат через сервисный ключ отвечает.
 - [ ] web-ui не пытается качать модели (`OFFLINE_MODE=true`):
-      `podman logs --since 5m halogen-web-ui 2>&1 | grep -iE "proxyerror|SentenceTransformer"`
-      — пусто. (До OFFLINE_MODE здесь был `httpx.ProxyError: 403 Forbidden` —
-      штатная работа egress, но шум и мёртвый RAG.) Требует рестарта web-ui
-      после правки compose.
+      `podman logs --since 5m halogen-web-ui 2>&1 | grep -iE "proxyerror|Error loading|403"`
+      — пусто, и в логе видно `Offline mode enabled, skipping installation of
+      requirements`. Строка `Loading SentenceTransformer model from
+      /app/backend/data/cache/embedding/models/...` — **норма, а не ошибка**:
+      модель уже лежит в томе `webui_data` и грузится локально (проверено
+      2026-10-28). До `OFFLINE_MODE` здесь был `httpx.ProxyError: 403 Forbidden` —
+      штатная работа egress, но шум и мёртвый RAG.
 - [ ] Перевыпуск ключа: `make key-rotate NAME=agent-lap1` → старый ключ → 401,
       новый из вывода → 200 (auth-provider перечитывает `keys.acl` по mtime,
-      рестарт не нужен). **Ещё не проверялось.**
+      рестарт не нужен). Сама команда проверена 2026-10-28 на `webui`; цикл
+      401→200 на агентском ключе — **ещё не проверялось**. Напоминание: после
+      перевыпуска `webui` править `.env` и `make up` (`admin-keys.md`).
 - [ ] whitelist: `make whitelist-add DOMAIN=php.net` → тесты из
       `admin-whitelist.md` (200 html / картинка отклонена / не-whitelist отклонён);
       `make whitelist-rm DOMAIN=php.net` → php.net снова отклонён.

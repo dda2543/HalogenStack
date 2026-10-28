@@ -59,13 +59,32 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   CRS). Сертификат — certbot на хосте через `make`. **DNS-запись ai.dda2543.ru
   ещё не создана** — предпосылка публичного запуска.
 - Scope WAF — только публичный путь WebUI (LAN-путь агентов без WAF).
+- Каркас фазы 2 (создан 2026-10-26, **на сервере не проверялся**):
+  `compose.public.yaml` (waf-firewall в сети `public`, порт хоста `443`→`8443`
+  в контейнере — без `CAP_NET_BIND_SERVICE`), `waf/Dockerfile` (Caddy+Coraza+CRS,
+  версии ARG — зафиксировать после первой сборки), `config/caddy/Caddyfile.waf`
+  (`SecRuleEngine DetectionOnly` на первый прогон), `make waf-build/public-up/
+  cert/cert-renew`, `docs/admin-public.md`, чек-лист §Е. Два решения: сертификат
+  через `certbot --standalone` (waf занимает только 443; редиректа HTTP→HTTPS
+  нет), и reverse-proxy отвечает `403` на `/v1/*` с публичным `Host` — LLM API
+  наружу не светится. Предпосылка на хосте: `net.ipv4.ip_unprivileged_port_start=0`.
 - Механизм auth-provider (подтверждён): reverse-proxy → forward-auth к
   auth-provider на каждый запрос; ключи в файлах хоста, перечитывание по
   сигналу/таймеру.
-- LAN-путь агентов: **HTTP (решение для MVP)**; переход на self-signed TLS —
-  в roadmap (§9).
+- Путь агентов (решение 2026-10-26, заменило «HTTP в LAN» и «self-signed TLS»):
+  **WireGuard на сервере + VLAN-containment на роутере**. `8731` биндится на
+  туннельный адрес (`LAN_IP=10.80.0.1`), в LAN слушателя нет; из интернета
+  проброшены только 443 и 80 (ACME). Два слоя ключей (пир WG + `keys.acl`) —
+  осознанно. Документация: `docs/admin-router-mikrotik.md`,
+  `docs/admin-server-ubuntu.md`, `docs/admin-client-macos.md`; канон —
+  `docs/architecture.md` §3.1. Реализация — вне репозитория (роутер и хост),
+  агент к ней не причастен.
 - Whitelist доменов WebUI: **изначально пуст**; в документации — пример
   добавления php.net.
+- web-ui запускается с `OFFLINE_MODE: "true"` (решение 2026-10-26): эмбеддинги с
+  HuggingFace не скачиваются (их всё равно режет egress), проверка версий
+  выключена. Следствие — RAG-встраивания в MVP не работают; возврат только через
+  монтирование готового кэша HF отдельным томом.
 - `egress-proxy` (squid) **одобрен** как 6-й сервис: единственный контейнер
   с маршрутом наружу; web-ui ходит через него по `HTTP_PROXY`.
 - ПО прокси **одобрено — Caddy дважды**: `waf-firewall` = Caddy+Coraza (CRS),
@@ -73,6 +92,15 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 - MVP: `halogen-flash-server` запускается **без** `HALOGEN_API_KEY` (не
   тестирован на сервере). Защита LLM API — только сетевая изоляция (доступен
   лишь с reverse-proxy). Включение ключа — roadmap (§9).
+- Prompt-кэш halogen — **только в RAM** (решение 2026-10-28, ветка
+  `agent/prompt-cache-ram-only`): `HALOGEN_CACHE_DIR` не задан, том `/cache`
+  не монтируется, `HALOGEN_FORK: "0"`. Причина: дисковый слой разросся до
+  42 GiB за 14 минут работы Claude Code (28 разговоров × ~1.4 GiB) при
+  33 GiB свободного места на разделе; лимит `HALOGEN_CACHE_DISK_GIB=64` был
+  больше свободного места, поэтому LRU-чистка не включалась никогда. Цена:
+  после рестарта контейнера все разговоры холодные (32k ≈ 40 с prefill).
+  Возврат — раскомментировать две переменные в `compose.yaml` и вернуть том
+  `/cache`, лимит взять заметно меньше свободного места раздела.
 
 ## 2. Режим работы
 
@@ -106,6 +134,7 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 | `/docs/halogen-flash-server/` | Репозиторий LLM-сервера: README, `docs/` (configuration.md, api.md, sessions.md, limits.md…), `docker-compose.yml`. |
 | `/docs/halogen-server/` | Родственный движок (Qwen3.8-27B, `ghcr.io/peonist-ai/halogen`). Не целевой компонент стека — справочный. |
 | `/docs/open-webui/` | WebUI (Open WebUI, форк-подобный upstream). Целевой компонент. |
+| `/docs/caddy/` | Исходники Caddy v2 — источник фактов о поведении `forward_auth`, матчеров и `rewrite` (сеть для поиска по GitHub недоступна). |
 
 ## 5. Установленные технические факты
 
@@ -148,6 +177,26 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   `user: "0:0"` в compose — без chown и без флага монтирования `U` (U
   переставлял владельца на подuid). Источник: `compose.yaml`
   (internal-auth-provider) + маппинг uid в rootless podman.
+- **Образ `halogen-flash-server` включает fork-механизм сам.** Если переменные
+  не заданы, entrypoint экспортирует `HALOGEN_FORK=1` и `HALOGEN_FORK_MAP=auto`
+  (`/docs/halogen-flash-server/deploy/entrypoint.sh:1000-1001`). Auto-keep
+  хранит состояние конца каждого ответа (~0.11 GiB RAM + позиции KV-пула,
+  `FLAGS.md:161-162`), а с `HALOGEN_CACHE_DIR` ещё и пишет его на диск.
+  Справочный `sessions.md` здесь устарел: утверждает «off by default», тогда
+  как `FLAGS.md:157` — «on by default since 0.18.15». Отключается только явным
+  `HALOGEN_FORK=0`; при `0` entrypoint `FORK_MAP` не подставляет, так что
+  «map без HALOGEN_FORK=1» (останавливает сервер) не происходит.
+- **Дисковый prompt-кэш halogen: ~27 KiB на токен контекста** — 0.9 GB при 32k,
+  2.7 GB при 100k, 7.2 GB при 262k
+  (`/docs/halogen-flash-server/docs/configuration.md:344-345`, `FLAGS.md:134`).
+  Один разговор поэтому ограничен ~7.2 GiB при `HALOGEN_CTX=262144` — растут не
+  отдельные разговоры, а их *количество* (у Claude Code: основной тред, каждый
+  субагент, side-запросы title/summary) и число поддеревьев конфигураций.
+  `HALOGEN_CACHE_DISK_GIB` ограничивает только текущее поддерево и вытесняет по
+  LRU лишь когда новый разговор превысит лимит (`FLAGS.md:135-136`).
+  Поддерево = сборка + веса + контекст + числовые настройки; `fingerprint`
+  внутри него перечисляет эффективные env (так и выяснилось, что `HALOGEN_FORK=1`
+  ставит образ). `handles.json` и `fingerprint` документацией не описаны.
 
 ## 6. Обнаруженные противоречия (к разрешению на этапе планирования)
 
@@ -171,6 +220,11 @@ node-exporter, blackbox-exporter, prometheus, grafana.
 7. **`ipc: host` в проверенном compose** делит IPC-namespace хоста — против
    цели 5. Проверить на сервере: ROCm с приватным IPC + `shm_size` вместо
    `ipc: host`; заодно — нужна ли ещё `NET_RAW`.
+8. **SELinux vs Ubuntu.** §5 утверждает «SELinux-enforcing хост» (выведено из
+   флага `:z` в проверенном `reference/compose.yaml`), но сервер LLM — Ubuntu
+   (по умолчанию AppArmor, не SELinux). Уточнить у человека: если SELinux нет,
+   флаги `,z`/`:z` в монтированиях — безвредная лишняя запись, а пункт чек-листа
+   §Б про `ausearch -m avc` надо убрать. До ответа ничего не менять.
 
 ## 7. Открытые вопросы к человеку
 
@@ -195,7 +249,9 @@ auth-provider, Makefile, примеры env/secrets); смоук-тест auth-p
 
 ## 9. Roadmap (после MVP)
 
-- Перевод LAN-пути агентов с HTTP на self-signed TLS (решение MVP — HTTP, §1.2).
+- Внедрение пути агентов по §1.2: WG на сервере + VLAN на MikroTik (доки
+  `admin-router-mikrotik.md` / `admin-server-ubuntu.md` / `admin-client-macos.md`),
+  затем смена `LAN_IP` в `.env` на `10.80.0.1` и проверка чек-листа §Б.
 - Стек мониторинга: metrics-waf, node-exporter, blackbox-exporter, prometheus,
   grafana — возможно, на отдельном хосте; сети проектировать с запасом под него.
 - Публичный запуск WebUI требует: DNS-запись ai.dda2543.ru → IP сервера,
@@ -288,11 +344,93 @@ auth-provider в контейнере агента — 9/9 PASS (в т.ч. `?x=1
 что `/health` на порту прокси — это web-ui (catch-all), а halogen — только
 `/healthz`. **Требуется рестарт reverse-proxy + `caddy validate`.**
 
-**Точка входа следующей сессии:** (1) web-ui в MVP без загрузчика моделей:
-`OFFLINE_MODE: "true"` в env web-ui (ставит `HF_HUB_OFFLINE=1` и выключает
-auto-update embedding/rerank/whisper и проверку версий —
-`/docs/open-webui/backend/open_webui/env.py:1225`); решение о RAG (монтировать
-кэш HF в образ или RAG не включать) принимает человек. (2) проверить на сервере
-`/healthz` → 200 после рестарта прокси. После — каркас фазы 2
-(`compose.public.yaml` + waf-firewall, TLS ai.dda2543.ru).
+**Подтверждено на сервере:** `/healthz` → 200 после `rewrite /health`.
+
+**Добавлено (решение человека):** web-ui переведён на `OFFLINE_MODE: "true"`
+(`compose.yaml`, §1.2) — убирает стартовый `httpx.ProxyError: 403` и мёртвый
+RAG. Требует рестарта web-ui и проверки из чек-листа §C.
+
+**Каркас фазы 2 (конец сессии 3).** Создано: `compose.public.yaml`
+(waf-firewall, сеть `public`, `443`→`8443`, `read_only`+tmpfs, `cap_drop: ALL`,
+`user: "0:0"` под читаемость сертификатов 0600), `waf/Dockerfile`
+(Caddy+Coraza+CRS, версии в ARG — не проверены), `config/caddy/Caddyfile.waf`
+(TLS с файлов + Coraza в DetectionOnly), `scripts/cert-deploy.sh` (deploy-hook
+certbot → `CERTS_DIR` с владельцем-админом), цели `make waf-build / public-up /
+public-down / public-logs / cert / cert-renew`, `.env.example` (PUBLIC_DOMAIN,
+CERTS_DIR), `docs/admin-public.md`, чек-лист §Е. Правки фазы 1: сеть `public`
+объявлена в `compose.yaml`, reverse-proxy в неё подключён и получил
+`PUBLIC_DOMAIN`, в его Caddyfile добавлен `403` на `/v1/*` с публичным `Host`.
+Ничего из этого агент не запускал (нет podman/сети) — прогон §Е за человеком.
+Там же актуализирован `docs/server-test-checklist.md`: заголовок «фазы 1–2»,
+блок «0. Статус последнего прогона» (что уже зелёное и что не проверялось),
+убран устаревший порт 8000, исправлена ссылка §6.1 → §6 п.1/7, добавлены
+регрессии (голый `/v1`, `key-rotate`, чистый лог web-ui после OFFLINE_MODE),
+имена сетей выводятся через `podman network ls` (разделитель зависит от версии
+podman-compose), а пункт E про `/healthz` переформулирован как **решение**
+(сейчас версия halogen доступна из интернета).
+
+**Сегментация сети (решение человека, та же сессия).** Выбран «идеальный путь»:
+WireGuard на сервере (путь агентов, `8731` только на туннельном адресе) +
+VLAN-containment на MikroTik (сервер вне LAN, из интернета только 443 и 80).
+Два слоя ключей приняты сознательно. Написаны три эксплуатационных документа:
+`docs/admin-router-mikrotik.md`, `docs/admin-server-ubuntu.md`,
+`docs/admin-client-macos.md`; канон дополнен §3.1, roadmap §9 переписан (пункт
+«self-signed TLS для LAN» заменён на WG). Ничего из этого не проверялось агентом
+(нет доступа ни к роутеру, ни к хосту) — синтаксис RouterOS, пути Homebrew и
+номера адресов сверять на месте.
+
+**Коммиты сессии 3:** `45ec61a` (фикс query-строк), `77c2d66`, `54a587c`,
+`01ca233` (`/healthz`→`/health`), `e9442a8` (OFFLINE_MODE), `175c20e` (каркас
+фазы 2), `04cba30` (актуализация чек-листа), `0769d9b` (доки по сегментации сети).
+
+**2026-10-28 (сессия 4).** Разобран дефект: дисковый prompt-кэш halogen
+заполняет диск. Замеры с сервера: `cache/e7caae6ebf84781b/` — **42 GiB**, 28
+подкаталогов-разговоров (26 по ~1.4 GiB, один 7.0 GiB), все созданы за 14
+минут (15:36→15:50); раздел `/` — 504G, занято 450G, **свободно 33G (94%)**.
+Размер каждого каталога соответствует документации (~27 KiB на токен:
+1.4 GiB ≈ 54k токенов, 7.0 GiB ≈ 270k — упёрся в `HALOGEN_CTX`), то есть
+аномалии в одном разговоре нет: их слишком много. Множитель — Claude Code
+заводит отдельный разговор на основной тред, каждого субагента и каждый
+side-запрос, а `HALOGEN_FORK=1` + `HALOGEN_FORK_MAP=auto` включал **сам образ**
+(`entrypoint.sh:1000-1001`), мы эти переменные не задавали.
+`HALOGEN_CACHE_DISK_GIB=64` превышал свободное место → LRU-чистка не включалась
+никогда. **Изменения (ветка `agent/prompt-cache-ram-only`):** из `compose.yaml`
+убраны `HALOGEN_CACHE_DIR`, `HALOGEN_CACHE_DISK_GIB`, `HALOGEN_CACHE_PRUNE_OLD`
+и том `/cache`, добавлен `HALOGEN_FORK: "0"`; `CACHE_DIR` выведен из
+`.env.example`; в `docs/architecture.md` §7 исправлено утверждение про tmpfs
+(`/cache` был bind-томом, а не tmpfs); в чек-листе §A — проверка env/томов,
+отсутствие роста `./cache` и разовая очистка 42 GiB на остановленном
+контейнере. Факты — в §5. **Агент не запускал** (нет podman/сервера): прогон §A
+за человеком. Побочный эффект решения: после рестарта halogen все разговоры
+холодные (32k ≈ 40 с prefill).
+
+**Точка входа следующей сессии (обновлено 2026-10-28).** Порядок — от дешёвого к
+дорогому:
+
+1. Прогон §A чек-листа после перевода prompt-кэша в RAM (ветка
+   `agent/prompt-cache-ram-only`): в контейнере `HALOGEN_FORK=0`, тома `/cache`
+   нет, `./cache` не растёт; разово удалить старые 42 GiB на остановленном
+   контейнере и сверить `df -h /` (было 94% занято, 33G свободно).
+2. Рестарт web-ui после `OFFLINE_MODE` → чек-лист §C (в логе не должно быть
+   `ProxyError|SentenceTransformer`). Заодно `make key-rotate` — он ни разу не
+   проверялся.
+3. Фаза 2, чек-лист §Е: предпосылки (DNS `ai.dda2543.ru`,
+   `net.ipv4.ip_unprivileged_port_start=0`, certbot), затем `make waf-build`.
+   Ждать ошибок в двух местах: версии `CORAZA_CADDY_VERSION=latest` /
+   `CRS_VERSION=v4.4.0` в `waf/Dockerfile` и синтаксис блока `seclang` —
+   каркас писался без `caddy validate`. После сборки зафиксировать версии.
+4. Решение по `/healthz` наружу (сейчас публично видна версия halogen) —
+   закрыть или оставить, зафиксировать в §1.2.
+5. Сегментация по новым документам: VLAN на MikroTik → WG на сервере → смена
+   `LAN_IP` на `10.80.0.1` → чек-лист §Б. Открытый вопрос: оставить ли проброс
+   :80 под `certbot --standalone` или перевыпустить `make cert` на DNS-01
+   (тогда правило :80 из доков уходит).
+6. Мелочь, отложенная осознанно: `PUBLIC_BIND_IP` в `.env`, чтобы 443 не
+   публиковался на `0.0.0.0` (актуально после появления VLAN).
+
+**Контекст для агенту:** git в контейнере — только через
+`GIT_CONFIG_GLOBAL=/tmp/gitconfig` и `-c safe.directory=/workspace/src`
+(`/home/agent` read-only, `.git` принадлежит root); `chmod` запрещён, скрипты
+вызывать через `sh`. Факты о Caddy — из локальных исходников `/docs/caddy`
+(сети для GitHub нет).
 

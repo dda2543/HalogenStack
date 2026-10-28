@@ -71,4 +71,8 @@
 - [docs/architecture.md](docs/architecture.md) — канон архитектуры.
 - [docs/admin-keys.md](docs/admin-keys.md) — ключи пользователей (`make key-*`).
 - [docs/admin-whitelist.md](docs/admin-whitelist.md) — whitelist WebUI (`make whitelist-*`).
+- [docs/admin-public.md](docs/admin-public.md) — публичный вход WebUI (фаза 2: waf-firewall, TLS).
+- [docs/admin-router-mikrotik.md](docs/admin-router-mikrotik.md) — VLAN для сервера и проброс портов на MikroTik.
+- [docs/admin-server-ubuntu.md](docs/admin-server-ubuntu.md) — сервер LLM: адресация VLAN и WireGuard для агентов.
+- [docs/admin-client-macos.md](docs/admin-client-macos.md) — ноутбук агента: WireGuard + доступ к API.
 - [docs/server-test-checklist.md](docs/server-test-checklist.md) — прогон на сервере перед тем, как считать фазу 1 зелёной.

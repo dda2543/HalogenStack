@@ -67,6 +67,33 @@ whitelist-rm: ## make whitelist-rm DOMAIN=php.net
 whitelist-list: ## активные записи whitelist
 	@grep -v '^#' $(WHITELIST) | grep . || echo "(пусто — наружу нельзя никуда)"
 
-# --- Фаза 2 (заготовки) ---
-# cert-renew: certbot renew && $(PODMAN) restart halogen-waf
-# waf-up:     $(COMPOSE) -f compose.yaml -f compose.public.yaml up -d
+# --- Фаза 2: публичный вход WebUI (waf-firewall, TLS) ---
+# Подробности: docs/admin-public.md
+
+PUBLIC_COMPOSE := -f compose.yaml -f compose.public.yaml
+PUBLIC_DOMAIN  ?= ai.dda2543.ru
+CERTS_DIR      ?= ./secrets/certs
+
+.PHONY: waf-build public-up public-down public-logs cert cert-renew
+
+waf-build: ## собрать образ waf-firewall (Caddy + Coraza + CRS; нужен интернет)
+	$(COMPOSE) $(PUBLIC_COMPOSE) build waf-firewall
+
+public-up: ## фаза 1 + waf-firewall (публичный вход)
+	$(COMPOSE) $(PUBLIC_COMPOSE) up -d --build
+
+public-down: ## снять всё вместе с фазой 2
+	$(COMPOSE) $(PUBLIC_COMPOSE) down
+
+public-logs: ## логи waf-firewall
+	$(PODMAN) logs --tail=100 -f halogen-waf
+
+cert: ## make cert CERT_EMAIL=admin@... — выпуск сертификата (нужен DNS и свободный :80)
+	@test -n "$(CERT_EMAIL)" || { echo "использование: make cert CERT_EMAIL=admin@$(PUBLIC_DOMAIN)"; exit 1; }
+	@echo "Требования: DNS $(PUBLIC_DOMAIN) → IP сервера; порт 80 на хосте свободен (waf слушает 443)."
+	sudo certbot certonly --standalone --agree-tos -m $(CERT_EMAIL) -d $(PUBLIC_DOMAIN) \
+	  --deploy-hook 'sh $(CURDIR)/scripts/cert-deploy.sh $(abspath $(CERTS_DIR)) $(shell id -un)'
+
+cert-renew: ## продлить сертификаты и перезапустить waf (иначе Caddy держит старый)
+	sudo certbot renew
+	-$(PODMAN) restart halogen-waf

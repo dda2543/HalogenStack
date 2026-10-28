@@ -13,8 +13,8 @@
                           │ waf-firewall │  Caddy + Coraza (CRS)
                           └──────┬───────┘  сеть: public
  LAN (2 ноутбука)                │
-   агенты ──8731/tcp──▶ ┌────────▼────────┐
-   (HTTP, MVP)          │  reverse-proxy  │  Caddy (forward_auth)
+   агенты ─WireGuard─▶ ┌────────▼────────┐
+   (туннель, §3.1)     │  reverse-proxy  │  Caddy (forward_auth)
                         └───┬──────────┬──┘  сети: public + internal
               forward-auth  │          │
                  ┌──────────┘          │
@@ -37,7 +37,7 @@
 | internal-auth-provider | своя сборка (node) | internal | — |
 | web-ui | Open WebUI | internal, egress | — |
 | egress-proxy | squid | egress | — |
-| waf-firewall | Caddy 2 + Coraza (CRS) | public | `0.0.0.0:443` (фаза 2) |
+| waf-firewall | Caddy 2 + Coraza (CRS), своя сборка `waf/` | public | `0.0.0.0:443` → `8443` в контейнере (фаза 2) |
 
 ## 3. Сети podman
 
@@ -54,10 +54,28 @@
 у web-ui прямого пути наружу нет физически (обе его сети — internal), весь
 исходящий трафик идёт через squid по `HTTP_PROXY`.
 
+### 3.1 Внешняя сегментация (решение 2026-10-26)
+
+Хост стека отделён от основной LAN и не имеет в неё маршрута; путь агентов
+шифруется. Два независимых механизма, они закрывают разные дыры:
+
+- **VLAN на роутере (MikroTik)** — containment: сервер в `10.20.0.0/24`, доступ
+  «сервер → LAN» запрещён, из интернета проброшены только `443` (WebUI) и `80`
+  (ACME-выпуск). Не шифрует ничего.
+- **WireGuard на сервере** — путь агентов: `8731` биндится на туннельный адрес
+  (`LAN_IP=10.80.0.1`), в LAN слушателя нет вовсе; персональные ключи едут
+  внутри туннеля, а не открытым HTTP. Не изолирует скомпрометированный хост.
+
+Порт `8731` наружу не публикуется. Два слоя учётных данных (ключ пира WG +
+персональный ключ из `keys.acl`) — осознанно: отзыв доступа требует обоих шагов.
+Конкретика: `docs/admin-router-mikrotik.md`, `docs/admin-server-ubuntu.md`,
+`docs/admin-client-macos.md`.
+
 ## 4. Пути запросов
 
-1. **Агент (LAN):** агент → `http://LAN_IP:8731/v1|v1/messages` с
-   `Authorization: Bearer <персональный ключ>` → reverse-proxy делает
+1. **Агент:** агент → WireGuard-туннель → `http://10.80.0.1:8731/v1|v1/messages`
+   с `Authorization: Bearer <персональный ключ>` (HTTP внутри туннеля WG,
+   §3.1) → reverse-proxy делает
    forward-auth запрос к internal-auth-provider (тот сверяет ключ с файлами
    хоста) → при 200 reverse-proxy → halogen-flash-server. В MVP halogen работает
    без собственного ключа (roadmap: включить `HALOGEN_API_KEY`).
@@ -70,6 +88,11 @@
    squid: только GET, домены из whitelist (изначально пуст), allowlist
    Content-Type (text/html, text/plain). Медиа отсекается по Content-Type —
    это эвристика, не гарантия.
+5. **WebUI и загрузка моделей:** у web-ui нет и не может быть пути скачать
+   эмбеддинги (бинарники режет и whitelist, и Content-Type), поэтому он запущен
+   с `OFFLINE_MODE: "true"` (`compose.yaml`) — `HF_HUB_OFFLINE=1`, без
+   auto-update моделей и без проверки версий. Следствие: RAG-встраивания в MVP
+   не работают; возврат — только монтированием готового кэша HF отдельным томом.
 
 ## 5. Модель доверия
 
@@ -90,13 +113,21 @@
 - **Фаза 1 (MVP):** 5 сервисов без waf-firewall; агенты по HTTP в LAN;
   web-ui доступен из LAN через reverse-proxy; whitelist пуст (= наружу
   нельзя ни на какой домен).
-- **Фаза 2:** waf-firewall + DNS `ai.dda2543.ru` + certbot на хосте (make)
-  → публичный вход WebUI на 443.
+- **Фаза 2 (каркас создан 2026-10-26, на сервере ещё не проверялся):**
+  waf-firewall + DNS `ai.dda2543.ru` + certbot на хосте (make) → публичный вход
+  WebUI на 443. Детали: `compose.public.yaml`, `waf/Dockerfile`,
+  `config/caddy/Caddyfile.waf`, `docs/admin-public.md`. Два решения каркаса:
+  сертификат выпускается `certbot --standalone` (waf слушает только 443, поэтому
+  :80 свободен и для выпуска, и для продления; HTTP→HTTPS редиректа нет), и
+  reverse-proxy отклоняет `403` запросы к `/v1/*` с публичным `Host` — LLM API
+  в интернет не светится даже через WAF.
 
 ## 7. Что проверить тестами на сервере
 
 - ROCm без `ipc: host` (приватный IPC + `shm_size`); заодно — нужна ли `NET_RAW`.
-- `read_only: true` + tmpfs для halogen-flash-server (кэш `/cache`, `/tmp`, `/run`).
+- `read_only: true` + tmpfs для halogen-flash-server (`/tmp`, `/run`). Том
+  `/cache` убран 2026-10-28 вместе с дисковым prompt-кэшем (§10 CLAUDE.md) —
+  заодно проверить, что контейнер стартует без него.
 - SELinux: монтирования с `:z/:Z`, работа Coraza (запись audit-логов).
 - SSE-стриминг LLM сквозь reverse-proxy (без буферизации, без WAF на этом пути).
 - Open WebUI: `HTTP_PROXY`/`NO_PROXY` (внутренние адреса — мимо squid).
@@ -104,6 +135,7 @@
 
 ## 8. Roadmap (детали: CLAUDE.md §9)
 
-self-signed TLS для LAN-пути агентов → `HALOGEN_API_KEY` на halogen →
+WireGuard-туннель для пути агентов + VLAN-containment (решение принято,
+реализация — вне репозитория, см. §3.1) → `HALOGEN_API_KEY` на halogen →
 мониторинг (metrics-waf, node-exporter, blackbox-exporter, prometheus,
 grafana) → опционально OIDC для Open WebUI.

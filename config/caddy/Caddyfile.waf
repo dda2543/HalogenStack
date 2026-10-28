@@ -1,0 +1,39 @@
+# halogen-stack waf-firewall (фаза 2): единственная публичная точка входа.
+#   интернет:443 → (этот контейнер: TLS + Coraza/CRS) → reverse-proxy:8080 → web-ui
+# Канон: docs/architecture.md
+#
+# Порт 8443 внутри контейнера: наружу публикуется как 443 (см. compose.public.yaml),
+# чтобы Caddy не понадобился CAP_NET_BIND_SERVICE.
+# Сертификат — с хоста, certbot + deploy-hook (make cert), read-only монтирование.
+
+{
+	admin off
+
+	seclang {
+		# Базовые директивы Coraza из модуля (SecDefaultAction и пр.) — первыми.
+		Include @coraza.conf-recommended
+
+		# Первый прогон — только детект: пишется в лог, не блокируется.
+		# Когда разобраны ложные срабатывания (см. docs/admin-public.md §4) — On.
+		SecRuleEngine DetectionOnly
+
+		# Тело запроса нужно: web-ui шлёт JSON и загружает файлы.
+		SecRequestBodyAccess On
+		SecRequestBodyLimit 20971520
+		SecRequestBodyLimitAction Reject
+
+		Include /etc/coraza/crs-setup.conf
+		Include /etc/coraza/rules/*.conf
+	}
+}
+
+{$PUBLIC_DOMAIN}:8443 {
+	tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
+
+	coraza
+
+	# Ответы LLM/WebUI (SSE) не буферизуем.
+	reverse_proxy reverse-proxy:8080 {
+		flush_interval -1
+	}
+}

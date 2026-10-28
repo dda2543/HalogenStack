@@ -10,7 +10,10 @@ WHITELIST := config/squid/whitelist.txt
 # LAN_IP передан пустым через окружение (podman-compose берёт окружение даже
 # при значении в .env — именно так в 2026-10-28 получили `invalid port number`)
 # и LAN_IP пуст/отсутствует в .env.
-GUARD_LAN_IP = if [ -n "$${LAN_IP+x}" ]; then test -n "$$LAN_IP" || { echo "LAN_IP передан пустым окружением — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }; else grep -qE '^LAN_IP=[^[:space:]]' .env 2>/dev/null || { echo "LAN_IP не задан в .env — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }; fi
+# Шаблон поиска в .env терпим к вариантам записи (export LAN_IP=…, пробелы
+# вокруг `=`) — их podman-compose понимает, а узкий `^LAN_IP=` их бы не нашёл
+# и отклонил бы валидный запуск.
+GUARD_LAN_IP = if [ -n "$${LAN_IP+x}" ]; then test -n "$$LAN_IP" || { echo "LAN_IP передан пустым окружением — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }; else grep -qE '^[[:space:]]*(export[[:space:]]+)?LAN_IP[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null || { echo "LAN_IP не задан ни в окружении, ни в .env — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }; fi
 
 .PHONY: init up down build logs ps key-add key-rotate key-rm key-list whitelist-add whitelist-rm whitelist-list
 

@@ -1,8 +1,10 @@
 # halogen-stack reverse-proxy (фаза 1): HTTP в LAN, TLS — фаза 2 (waf-firewall).
 # Маршруты:
-#   Host = PUBLIC_DOMAIN + /v1/* — 403 (публичный путь: только web-ui, не LLM)
+#   Host = PUBLIC_DOMAIN + /v1/* или /healthz — 403 (публичный путь: только
+#                web-ui; LLM API и /healthz, отдающий версию движка, наружу не
+#                отдаются — решение от 2026-10-28)
 #   /v1/*   — LLM API: forward-auth к internal-auth-provider, затем halogen
-#   /healthz — открытый health halogen (для диагностики)
+#   /healthz — открытый health halogen, ТОЛЬКО с LAN-пути (диагностика)
 #   всё остальное — web-ui
 
 {
@@ -11,14 +13,15 @@
 }
 
 :8080 {
-	# Публичный путь (от waf-firewall) — только web-ui: LLM API в интернет
-	# не светится. Спуфить Host на LAN-пути можно, но это запрет самому себе —
-	# ключей такой трюк не обходит (forward-auth всё равно спрашивает auth-provider).
-	@public_api {
+	# Публичный путь (от waf-firewall) — только web-ui: наружу не светятся ни
+	# LLM API, ни /healthz (он отдаёт версию halogen). Спуфить Host на LAN-пути
+	# можно, но это запрет самому себе — ключей такой трюк не обходит
+	# (forward-auth всё равно спрашивает auth-provider).
+	@public_halogen {
 		header Host {$PUBLIC_DOMAIN}
-		path /v1 /v1/*
+		path /v1 /v1/* /healthz
 	}
-	handle @public_api {
+	handle @public_halogen {
 		respond "forbidden" 403
 	}
 

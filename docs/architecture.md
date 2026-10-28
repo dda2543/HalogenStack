@@ -128,7 +128,8 @@
 - `read_only: true` + tmpfs для halogen-flash-server (`/tmp`, `/run`). Том
   `/cache` убран 2026-10-28 вместе с дисковым prompt-кэшем (§10 CLAUDE.md) —
   заодно проверить, что контейнер стартует без него.
-- SELinux: монтирования с `:z/:Z`, работа Coraza (запись audit-логов).
+- SELinux на сервере нет (AppArmor) — проверено 2026-10-28, см. CLAUDE.md §5.
+  Отсюда остаётся только проверить работу Coraza (запись audit-логов).
 - SSE-стриминг LLM сквозь reverse-proxy (без буферизации, без WAF на этом пути).
 - Open WebUI: `HTTP_PROXY`/`NO_PROXY` (внутренние адреса — мимо squid).
 - bind reverse-proxy `8731` на LAN-интерфейс (не на 0.0.0.0).

@@ -109,8 +109,13 @@ URL с `?` в curl **обязательно в кавычках** — иначе
 - [ ] squid: пустой whitelist →
       `podman exec halogen-web-ui python -c "import requests;requests.get('http://example.org',timeout=10)"`
       → ошибка.
-- [ ] SELinux: `sudo ausearch -m avc -ts boot | grep -i halogen` — пусто
-      (или объяснить каждую запись).
+- [ ] SELinux на этом хосте **нет** (подтверждено 2026-10-28: `dpkg -l |
+      grep selinux` даёт только `libselinux1` — рантайм-библиотека, приходит
+      как зависимость; Ubuntu по умолчанию на AppArmor). Финальная проверка:
+      `[ -e /sys/fs/selinux ] && echo вкл || echo выключен` → «выключен».
+      Пункт про `ausearch -m avc` из чек-листа убран как неприменимый; флаги
+      `,z`/`:z` в монтированиях оставлены намеренно — на хосте без SELinux это
+      no-op, но они понадобятся при переносе на SELinux-хост.
 
 ## C. Функции
 
@@ -167,11 +172,13 @@ URL с `?` в curl **обязательно в кавычках** — иначе
       (логин Open WebUI по HTTPS, сертификат валиден).
 - [ ] LLM API снаружи закрыт: `https://ai.dda2543.ru/v1/models` — даже с
       валидным ключом → **403**, а не 200/401.
-- [ ] **Решить судьбу `/healthz` наружу.** Сейчас `https://ai.dda2543.ru/healthz`
-      отвечает 200 и отдаёт версию halogen — то есть публично доступен номер
-      версии движка. Варианты: оставить (диагностика) или закрыть на waf
-      (`respond 403` для `path /healthz`). Зафиксировать решение в
-      `CLAUDE.md` §1.2.
+- [ ] `/healthz` наружу закрыт (решение от 2026-10-28; реализовано в
+      `config/caddy/Caddyfile` — матчер `@public_halogen` добавляет `/healthz`
+      к публичному `Host`):
+      `curl -s -o /dev/null -w '%{http_code}\n' https://ai.dda2543.ru/healthz` →
+      **403**, а с LAN-пути по-прежнему 200
+      (`curl -s http://LAN_IP:8731/healthz`). Требует рестарта reverse-proxy и
+      `caddy validate`.
 - [ ] HTTP снаружи не обслуживается: `curl -sv http://ai.dda2543.ru/ 2>&1 | tail -3`
       → соединение отклонено (редиректа на HTTPS в каркасе нет, осознанно).
 - [ ] LAN-путь не пострадал: `http://LAN_IP:8731/v1/models` с ключом → 200.

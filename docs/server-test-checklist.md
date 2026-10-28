@@ -18,11 +18,19 @@ URL с `?` в curl **обязательно в кавычках** — иначе
   whitelist пуст);
 - C: чат через WebUI и прямой API-ответ модели `halogen-qwen3.8-flash-next`.
 
+Зелёное (подтверждено на сервере 2026-10-28):
+
+- A: prompt-кэш только в RAM + `HALOGEN_FORK=0` — `./cache` пуст (4 KiB),
+  `handles.json` не пересоздаётся, `PUBLIC_DOMAIN` из `podman-compose config`
+  = `ai.dda2543.ru`; в логе `serve_api` пул на 39–40% (≈207k/524k) при кэше
+  промптов 98.9–99.9% и 67–73 t/s;
+- A: `make key-rotate NAME=webui` отработал (значение выдаётся один раз).
+  Внимание: после перевыпуска `webui` нужно вписать значение в `.env` и
+  `make up` — иначе web-ui шлёт старый ключ и получает 401 (`admin-keys.md`).
+
 Не проверялось (новый код с 2026-10-26):
 
-- A: перевод prompt-кэша в RAM + `HALOGEN_FORK=0` (ветка `agent/prompt-cache-ram-only`,
-  2026-10-28) — пункты про `HALOGEN_FORK`/`./cache`/`df -h` ниже;
-- C: `make key-rotate`, проверка чистого лога web-ui после `OFFLINE_MODE`;
+- C: проверка чистого лога web-ui после `OFFLINE_MODE` (нужен рестарт web-ui);
 - D: ни один эксперимент по ужесточению ещё не прогонялся;
 - E: вся фаза 2 — каркас написан без podman/сети, ни один пункт не проверялся.
 
@@ -37,7 +45,9 @@ URL с `?` в curl **обязательно в кавычках** — иначе
       `.env`) и три агентских. `WEBUI_SECRET_KEY=$(openssl rand -hex 32)` в
       `.env`.
       Внимание: `key-add` не идемпотентен — для перевыпуска существующего имени
-      использовать `make key-rotate NAME=...`.
+      использовать `make key-rotate NAME=...`. Перевыпуск `webui` дополнительно
+      требует вписать новое значение в `.env` и `make up`: иначе web-ui шлёт
+      старый ключ и получает 401 на все запросы к LLM.
 - [ ] `make up` → `make ps`: 5 контейнеров up; у `halogen-auth-provider`
       статус healthy (спустя ~30 с).
 - [ ] `podman logs halogen-flash-server` — модель загрузилась, ошибок ROCm нет,

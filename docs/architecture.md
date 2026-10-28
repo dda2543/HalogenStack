@@ -125,7 +125,9 @@
 ## 7. Что проверить тестами на сервере
 
 - ROCm без `ipc: host` (приватный IPC + `shm_size`); заодно — нужна ли `NET_RAW`.
-- `read_only: true` + tmpfs для halogen-flash-server (кэш `/cache`, `/tmp`, `/run`).
+- `read_only: true` + tmpfs для halogen-flash-server (`/tmp`, `/run`). Том
+  `/cache` убран 2026-10-28 вместе с дисковым prompt-кэшем (§10 CLAUDE.md) —
+  заодно проверить, что контейнер стартует без него.
 - SELinux: монтирования с `:z/:Z`, работа Coraza (запись audit-логов).
 - SSE-стриминг LLM сквозь reverse-proxy (без буферизации, без WAF на этом пути).
 - Open WebUI: `HTTP_PROXY`/`NO_PROXY` (внутренние адреса — мимо squid).

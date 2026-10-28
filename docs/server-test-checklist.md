@@ -20,6 +20,8 @@ URL с `?` в curl **обязательно в кавычках** — иначе
 
 Не проверялось (новый код с 2026-10-26):
 
+- A: перевод prompt-кэша в RAM + `HALOGEN_FORK=0` (ветка `agent/prompt-cache-ram-only`,
+  2026-10-28) — пункты про `HALOGEN_FORK`/`./cache`/`df -h` ниже;
 - C: `make key-rotate`, проверка чистого лога web-ui после `OFFLINE_MODE`;
 - D: ни один эксперимент по ужесточению ещё не прогонялся;
 - E: вся фаза 2 — каркас написан без podman/сети, ни один пункт не проверялся.
@@ -28,7 +30,8 @@ URL с `?` в curl **обязательно в кавычках** — иначе
 
 - [ ] Подготовлено: podman ≥ 5.7, podman-compose, модели в `HALOGEN_MODELS_DIR`,
       в `.env` заданы `LAN_IP` (адрес LAN-интерфейса, не 127.0.0.1),
-      `HALOGEN_MODELS_DIR`, `CACHE_DIR`, `SECRETS_DIR`.
+      `HALOGEN_MODELS_DIR`, `SECRETS_DIR`. (`CACHE_DIR` больше не нужен —
+      дисковый prompt-кэш выключен 2026-10-28.)
 - [ ] `make init` — созданы `secrets/keys.acl` (0600) и `.env` из примеров.
 - [ ] 4 ключа: `make key-add NAME=webui` (значение → `WEBUI_SERVICE_KEY` в
       `.env`) и три агентских. `WEBUI_SECRET_KEY=$(openssl rand -hex 32)` в
@@ -39,6 +42,18 @@ URL с `?` в curl **обязательно в кавычках** — иначе
       статус healthy (спустя ~30 с).
 - [ ] `podman logs halogen-flash-server` — модель загрузилась, ошибок ROCm нет,
       видно `listening on 0.0.0.0:8731` и версию 0.18.15.
+- [ ] Prompt-кэш только в RAM (изменение 2026-10-28):
+      `podman inspect halogen-flash-server --format '{{json .Config.Env}}' | tr ',' '\n' | grep -iE 'FORK|CACHE'`
+      → виден `HALOGEN_FORK=0`, `HALOGEN_CACHE_DIR` отсутствует; тома `/cache`
+      нет в `podman inspect halogen-flash-server --format '{{json .Mounts}}'`.
+      Прогнать ходов пять Claude Code и убедиться, что `./cache` на хосте не
+      создаётся (`du -sh cache 2>/dev/null`). Побочный эффект: после рестарта
+      контейнера все разговоры холодные — первый ход заметно дольше
+      (32k-контекст ≈ 40 с prefill вместо нескольких секунд).
+- [ ] Разовая очистка старых 42 GiB (только при первом переходе на RAM-only):
+      `podman stop halogen-flash-server` — ждать до 60 с, при остановке
+      сливается последний ход; затем `rm -rf cache/*` и `make up`. Сверить
+      `df -h /`: до очистки было 94% занято, 33 GiB свободно.
 
 ## B. Изоляция (главная часть)
 

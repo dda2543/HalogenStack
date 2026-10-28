@@ -50,12 +50,25 @@ services:
       HALOGEN_MAX_TOKENS_DEFAULT: "16384"
       HALOGEN_MAX_TOK: "16384"
       HALOGEN_REASONING_EFFORT: xhigh
-      HALOGEN_CACHE_DIR: /cache
-      HALOGEN_CACHE_DISK_GIB: "64"
-      HALOGEN_CACHE_PRUNE_OLD: "1"
+      # Prompt-кэш — только в RAM (решение 2026-10-28). Дисковый слой пишет
+      # ~27 KiB на токен контекста (reference configuration.md:344) и на
+      # Claude Code разросся до 42 GiB за 14 минут — 28 разговоров по ~1.4 GiB,
+      # при 33 GiB свободного места на разделе. HALOGEN_CACHE_DISK_GIB=64 был
+      # больше свободного места, поэтому LRU-чистка не включалась никогда.
+      # Цена отказа: после рестарта все разговоры холодные (32k ≈ 40 с prefill).
+      # Возврат — раскомментировать и вернуть том /cache ниже; DISK_GIB взять
+      # заметно меньше свободного места раздела, а не дефолтные 64.
+      # HALOGEN_CACHE_DIR: /cache
+      # HALOGEN_CACHE_DISK_GIB: "16"
+      # Образ сам ставит HALOGEN_FORK=1 и HALOGEN_FORK_MAP=auto, если они не
+      # заданы (reference deploy/entrypoint.sh:1000-1001). Каждое keep-состояние
+      # держит ~0.11 GiB RAM и позиции KV-пула, а Claude Code заголовки
+      # X-Halogen-Keep/From не шлёт — fork нам не нужен. Выключен ЯВНО: одних
+      # закомментированных переменных выше мало, значение должен видеть образ.
+      HALOGEN_FORK: "0"
     volumes:
       - ${HALOGEN_MODELS_DIR}:/models:ro
-      - ${CACHE_DIR:-./cache}:/cache:z
+      # /cache не монтируется: дискового prompt-кэша нет (см. environment).
 
   reverse-proxy:
     image: docker.io/library/caddy:2

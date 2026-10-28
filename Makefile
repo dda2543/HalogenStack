@@ -5,6 +5,12 @@ SECRETS_DIR ?= ./secrets
 KEYS      := $(SECRETS_DIR)/keys.acl
 WHITELIST := config/squid/whitelist.txt
 
+# Пустой LAN_IP в интерполяции даёт ":8731:8080" — публикацию LLM-порта на
+# 0.0.0.0. В compose.yaml стоит guard `${LAN_IP:?…}`, но поведение
+# podman-compose на `:?` на сервере не проверялось, поэтому проверка
+# дублируется здесь и падает до всякой интерполяции.
+GUARD_LAN_IP = test -n "$${LAN_IP:-}" || grep -qE '^LAN_IP=[^[:space:]]' .env 2>/dev/null || { echo "LAN_IP не задан (.env или окружение) — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }
+
 .PHONY: init up down build logs ps key-add key-rotate key-rm key-list whitelist-add whitelist-rm whitelist-list
 
 init: ## создать пустой secrets/keys.acl и .env из примеров
@@ -12,6 +18,7 @@ init: ## создать пустой secrets/keys.acl и .env из пример�
 	@test -f .env || (cp .env.example .env && echo "создан .env: заполните LAN_IP, каталоги, ключи")
 
 up: ## поднять стек (build + up -d)
+	@$(GUARD_LAN_IP)
 	$(COMPOSE) -f compose.yaml up -d --build
 down: ## остановить стек
 	$(COMPOSE) -f compose.yaml down
@@ -80,6 +87,7 @@ waf-build: ## собрать образ waf-firewall (Caddy + Coraza + CRS; ну
 	$(COMPOSE) $(PUBLIC_COMPOSE) build waf-firewall
 
 public-up: ## фаза 1 + waf-firewall (публичный вход)
+	@$(GUARD_LAN_IP)
 	$(COMPOSE) $(PUBLIC_COMPOSE) up -d --build
 
 public-down: ## снять всё вместе с фазой 2

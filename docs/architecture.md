@@ -37,7 +37,7 @@
 | internal-auth-provider | своя сборка (node) | internal | — |
 | web-ui | Open WebUI | internal, egress | — |
 | egress-proxy | squid | egress | — |
-| waf-firewall | Caddy 2 + Coraza (CRS), своя сборка `waf/` | public | `0.0.0.0:443` → `8443` в контейнере (фаза 2) |
+| waf-firewall | Caddy 2 + Coraza (CRS), своя сборка `waf/` | public | `PUBLIC_BIND_IP:443` → `8443` в контейнере (пусто = `0.0.0.0`; фаза 2) |
 
 ## 3. Сети podman
 
@@ -49,7 +49,11 @@
 | `public` | да | waf-firewall, reverse-proxy (фаза 2) |
 
 Ровно два проброса на хост: `LAN_IP:8731` (reverse-proxy, агенты) и
-`0.0.0.0:443` (waf-firewall, фаза 2). `egress-proxy` — единственный
+`PUBLIC_BIND_IP:443` (waf-firewall, фаза 2; по умолчанию `0.0.0.0`, после VLAN
+сужается до адреса WAN-интерфейса). `LAN_IP` обязателен: пустое значение валит
+`make up` (`GUARD_LAN_IP` в `Makefile`, плюс `${LAN_IP:?…}` в compose) вместо
+молчаливой публикации `8731` на `0.0.0.0`.
+`egress-proxy` — единственный
 контейнер, состоящий в `wan`, то есть единственный с маршрутом в интернет;
 у web-ui прямого пути наружу нет физически (обе его сети — internal), весь
 исходящий трафик идёт через squid по `HTTP_PROXY`.
@@ -91,8 +95,13 @@
 5. **WebUI и загрузка моделей:** у web-ui нет и не может быть пути скачать
    эмбеддинги (бинарники режет и whitelist, и Content-Type), поэтому он запущен
    с `OFFLINE_MODE: "true"` (`compose.yaml`) — `HF_HUB_OFFLINE=1`, без
-   auto-update моделей и без проверки версий. Следствие: RAG-встраивания в MVP
-   не работают; возврат — только монтированием готового кэша HF отдельным томом.
+   auto-update моделей и без проверки версий. При этом RAG-встраивания
+   **работают**: `all-MiniLM-L6-v2` уже лежит в томе `webui_data` и грузится
+   локально. Основание — вывод из логов старта 2026-10-28 (`Loading
+   SentenceTransformer model from /app/backend/data/cache/embedding/models/…`,
+   ни `ProxyError`, ни 403); сквозного RAG-запроса отдельно не проверяли.
+   Незадокументированная зависимость: при пересоздании тома модель не
+   восстановить — egress её не пропустит (подробности: `CLAUDE.md` §1.2).
 
 ## 5. Модель доверия
 

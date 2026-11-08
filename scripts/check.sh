@@ -252,22 +252,27 @@ sec_A() {
     if [ "$used" -ge 90 ]; then info "занято / : $used% — тесно"; else info "занято / : $used%"; fi
   fi
 
-  # лог старта halogen
-  local log; log=$($PODMAN logs --tail 300 halogen-flash-server 2>&1)
+  # Лог старта читаем из НАЧАЛА лога контейнера, ошибки — из конца. `--tail 300`
+  # для стартовых строк не годится: на загруженном сервере 300 строк — это
+  # несколько минут работы, и warm start с 'listening on' уезжают из окна
+  # (проверено 2026-11-09: в полном логе строки есть, в хвосте их уже нет).
+  local log errlog
+  log=$($PODMAN logs 2>&1 halogen-flash-server | head -n 200)
+  errlog=$($PODMAN logs --tail 300 halogen-flash-server 2>&1)
   if printf '%s' "$log" | grep -q 'warm start'; then
     pass "warm start 0.18.23 в логе: $(printf '%s' "$log" | grep -m1 'warm start' | cut -c1-90)"
   else
-    skip "строки 'warm start' в последних 300 строках нет (её видно только на старте контейнера)"
+    skip "строки 'warm start' в начале лога нет (если контейнер пересоздавали с ротацией логов — смотреть полный лог)"
   fi
   if printf '%s' "$log" | grep -qF 'listening on [::]'; then
     pass "двойной стек (0.19.0): $(printf '%s' "$log" | grep -m1 'listening on' | cut -c1-90)"
   else
-    info "строки 'listening on [::]' нет — на 0.19.0+ она обязана быть, проверьте полный лог"
+    info "строки 'listening on [::]' в начале лога нет — на 0.19.0+ она обязана быть, проверьте полный лог"
   fi
   if printf '%s' "$log" | grep -q 'on_event'; then
     info "в логе осталось предупреждение on_event (в 0.19.1 его убрали)"
   fi
-  if printf '%s' "$log" | grep -qiE 'hipError|HSA_STATUS_ERROR|out of memory|CUDA error'; then
+  if printf '%s' "$errlog" | grep -qiE 'hipError|HSA_STATUS_ERROR|out of memory|CUDA error'; then
     fail "в логе halogen есть строки про ошибки ROCm/HIP/память"
   else
     pass "ошибок ROCm/HIP/OOM в последних 300 строках лога нет"
@@ -276,6 +281,21 @@ sec_A() {
 
 sec_A1() {
   section "A1. Регрессии после обновления образа (0.19.1 / 0.20.0)"
+
+  # Давление KV-пула и prompt-кэша за всю жизнь контейнера. Порог тревоги из
+  # CLAUDE.md §5: вытеснение записей кэша вместе с пулом на 9x% означает, что
+  # не хватает пула или слотов. Это не PASS/FAIL — размером пула решает человек,
+  # здесь только цифры.
+  local alllog forgot clamped poolmax
+  alllog=$($PODMAN logs 2>&1 halogen-flash-server)
+  forgot=$(printf '%s' "$alllog" | grep -c 'prompt cache: at its .*forgot')
+  clamped=$(printf '%s' "$alllog" | grep -c 'cannot grow and nothing holds a move')
+  poolmax=$(printf '%s' "$alllog" | grep -o 'pool [0-9]*/[0-9]* [0-9]*%' \
+            | awk '{gsub("%","",$3); if ($3>m) m=$3} END {print m+0}')
+  info "за жизнь контейнера: prompt-кэш вытеснил записей ${forgot:-0}, turn'ов с урезанным max_tokens ${clamped:-0}, пик пула ${poolmax:-0}%"
+  if [ "${clamped:-0}" != "0" ]; then
+    info "  'cannot grow' = генерации не хватило места, max_tokens урезан апстримом (вопрос о размере пула — §7)"
+  fi
 
   if [ "$NO_LLM" = 1 ]; then skip "--no-llm: проверки с запросами пропущены"; return 0; fi
   if [ -z "$KEY" ]; then skip "нет ключа — проверки с запросами пропущены"; return 0; fi

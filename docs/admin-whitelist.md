@@ -37,13 +37,17 @@ make whitelist-add DOMAIN=php.net
 podman exec halogen-web-ui python -c \
   "import requests; r=requests.get('http://php.net',timeout=15); print(r.status_code, r.headers.get('content-type'))"
 
-# картинка с того же домена: ожидаем ошибку (Content-Type отклонён)
+# картинка с того же домена: ожидаем ОБРЫВ соединения — Content-Type отклоняется
+# на стадии ответа (http_reply_access), squid не успевает ничего отдать, и
+# requests бросает исключение (в отличие от случая ниже)
 podman exec halogen-web-ui python -c \
-  "import requests; requests.get('http://php.net/images/php-logo.gif',timeout=15)"
+  "import requests; print(requests.get('http://php.net/images/php-logo.gif',timeout=15).status_code)"
 
-# не-whitelisted домен: ожидаем ошибку прокси
+# не-whitelisted домен: ожидаем 403. ВНИМАНИЕ: для requests.get() это НЕ ошибка —
+# страница отказа squid это обычный ответ с кодом 403, код возврата команды будет
+# нулевым. Смотреть надо на код, а не на «упала ли команда»
 podman exec halogen-web-ui python -c \
-  "import requests; requests.get('http://example.org',timeout=15)"
+  "import requests; print(requests.get('http://example.org',timeout=15).status_code)"
 ```
 
 ## В Open WebUI

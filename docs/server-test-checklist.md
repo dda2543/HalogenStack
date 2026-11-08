@@ -80,15 +80,44 @@ bash scripts/check.sh --self-test      # самопроверка парсеро
 - A1: фикс 0.18.23 про end-of-turn внутри reasoning виден в логе счётчиком
   `end of turn kept as text: N in the think block`.
 
-Не проверялось (новое с 2026-11-08):
+Зелёное (первый прогон `scripts/check.sh` на сервере, 2026-11-09):
 
-- `scripts/check.sh` — скрипт ещё ни разу не запускался на сервере;
-- A1: RAM-only после апгрейда (`HALOGEN_FORK=0` в env, тома `/cache` нет),
-  регрессия `400` на битую tool-схему, `ss -ltnp` — остальное в §A1;
+- A: 5 контейнеров up; версия front end и движка 0.20.0 = пин в `compose.yaml`;
+  RAM-only после апгрейда подтверждён (`HALOGEN_FORK=0` в env контейнера,
+  `HALOGEN_CACHE_DIR` нет, тома `/cache` нет, `./cache` на хосте не создаётся);
+  в последних 300 строках лога ошибок ROCm/HIP/OOM нет; двойной стек
+  `[::]` + `0.0.0.0:8731`.
+- A1: **фикс 0.19.1 подтверждён живьём** — битая tool-схема даёт `400`, и
+  обычный запрос сразу после неё проходит (`200`), значит генерационный слот
+  не удержан.
+- B: `8731` слушает только `192.168.101.249:8731`; наружу не светятся
+  8080/3128/9000; `internal`, `egress` и `public` — internal, в `wan` только
+  `halogen-egress-proxy`; у web-ui нет прямого пути наружу, у halogen — маршрута
+  по умолчанию; forward-auth: `401` без ключа и с bogus, `200` с валидным,
+  query-строки (`?` и `?x=1`) не режутся, голый `/v1` идёт в API; `/healthz`
+  с LAN-пути `200`.
+- C: SSE идёт потоком, `/v1/messages` по `x-api-key` (путь Claude Code) `200`,
+  лог web-ui чистый, `OFFLINE_MODE` подтверждён, эмбеддинг-модель грузится
+  локально.
+- E (локально): `/healthz` и `/v1/models` с публичным `Host` → `403`, тот же
+  запрос без заголовка → `200`.
 
-Не проверялось (новый код с 2026-10-26):
+  Первый прогон дал `PASS 37 · FAIL 2 · SKIP 4`, и **оба FAIL'а оказались
+  дефектами самого скрипта**, а не сервера: различение halogen/web-ui по
+  заголовку `Server:` (оба приложения uvicorn → заголовок одинаковый) и оценка
+  отказа squid по коду возврата `requests` (403 исключением не является). Оба
+  исправлены в тот же день; после фикса ожидаемый номинал — `FAIL 0`.
 
-- C: цикл 401→200 на агентском ключе после `key-rotate`;
+Не проверялось:
+
+- C: цикл `401→200` на агентском ключе после `key-rotate` — проверка ручная,
+  скрипт её не делает;
+- C: цикл whitelist (`make whitelist-add DOMAIN=php.net` → 200 html / картинка
+  отклонена → `make whitelist-rm`); скрипт при пустом whitelist проверяет
+  только отказ;
+- A1: `warm start` виден только в самом начале лога контейнера (в середине
+  смены скрипт даёт SKIP); крах при конкурентных strict tool calls — только
+  наблюдение в бою;
 - D: ни один эксперимент по ужесточению ещё не прогонялся;
 - E: вся фаза 2 — каркас написан без podman/сети; проверен только локальный
   `/healthz`-прогон (см. зелёное выше), остальное упирается в закрытые WAN-порты.
@@ -247,10 +276,22 @@ bash scripts/check.sh --self-test      # самопроверка парсеро
       halogen видно — см. пункт E про публичный доступ).
       ВНИМАНИЕ: `/healthz` — это halogen (Caddy переписывает на `/health`),
       а `/health` на том же порту — это web-ui (catch-all `handle`), не halogen.
-      Отличать по заголовку `Server:`: `uvicorn` vs web-ui.
-- [ ] squid: пустой whitelist →
-      `podman exec halogen-web-ui python -c "import requests;requests.get('http://example.org',timeout=10)"`
-      → ошибка.
+      Различать их нужно **телом ответа**, а не заголовком `Server:`: оба
+      приложения — FastAPI/uvicorn, и у обоих `Server: uvicorn` (web-ui
+      запускается через `uvicorn.run`, `open_webui/__init__.py:86`). У halogen
+      в теле версия и служебные поля (`halogen-flash-server/docs/api.md:69`),
+      у web-ui — строго `{"status":true}` (`open_webui/main.py:3077`):
+      `curl -s http://LAN_IP:8731/health` → `{"status":true}`.
+- [ ] squid: пустой whitelist → **отказ 403**. Оценивать надо код ответа, а не
+      то, упало ли приложение: `requests.get()` не бросает исключение на 403 —
+      страница отказа squid это обычный ответ с кодом 403.
+      `podman exec halogen-web-ui python -c "import requests;print(requests.get('http://example.org',timeout=10).status_code)"` → **403**;
+      тот же запрос по HTTPS (`https://example.org`) должен падать с
+      `ProxyError`: для туннелей в squid отдельное правило
+      `allow CONNECT allowed_sites` (`config/squid/squid.conf:29`), и внутри
+      туннеля Content-Type уже не фильтруется. Что squid режет видно и по логу
+      web-ui: до `OFFLINE_MODE` там был `httpx.ProxyError: 403 Forbidden` на
+      попытку тянуть HuggingFace.
 - [ ] SELinux на этом хосте **нет** (подтверждено 2026-10-28: `dpkg -l |
       grep selinux` даёт только `libselinux1` — рантайм-библиотека, приходит
       как зависимость; Ubuntu по умолчанию на AppArmor). Проверено напрямую:

@@ -165,14 +165,14 @@ api_body() {
   [ "$VERBOSE" = 1 ] && note "curl $* (ключ подставлен)"
   http_body -H "Authorization: Bearer $KEY" "$@"
 }
-# значение заголовка ответа; $1 — имя заголовка, остальное — аргументы curl
-header_of() {
-  local h=$1; shift
-  curl -s -o /dev/null -D - --max-time "$TIMEOUT" "$@" 2>/dev/null \
-    | tr -d '\r' | awk -v h="$h" 'tolower($1) ~ "^" tolower(h)":" { sub(/^[^:]*: */, ""); print; exit }'
-}
 
 container_state() { $PODMAN inspect -f '{{.State.Status}}' "$1" 2>/dev/null; }
+
+# Есть ли в web-ui python — им мы проверяем egress изнутри контейнера. Без этой
+# проверки «python не запустился» неотличим от «python запустился и его не пустили»:
+# обе ветки дают ненулевой код возврата, и проверка прямого пути наружу
+# проходила бы по неверной причине.
+webui_py_probe() { $PODMAN exec halogen-web-ui python -c 'print(1)' 2>/dev/null | tail -n 1; }
 
 model_id() { api_body "$BASE/v1/models" | grep -o '"id":"[^"]*"' | head -n 1 | cut -d'"' -f4; }
 
@@ -360,14 +360,16 @@ sec_B() {
   fi
 
   # изоляция самих контейнеров
+  local py_ok=0
   if [ "$(container_state halogen-web-ui)" = "running" ]; then
-    if $PODMAN exec halogen-web-ui python -c "import socket;socket.create_connection(('1.1.1.1',443),4)" >/dev/null 2>&1; then
-      fail "web-ui достал до 1.1.1.1:443 — у него появился прямой путь наружу"
-    else
-      pass "web-ui не достаёт наружу напрямую"
-    fi
+    [ "$(webui_py_probe)" = "1" ] && py_ok=1
+  fi
+  if [ "$py_ok" != 1 ]; then
+    skip "в web-ui нет python (или контейнер не поднят) — проверки egress изнутри пропустить"
+  elif $PODMAN exec halogen-web-ui python -c "import socket;socket.create_connection(('1.1.1.1',443),4)" >/dev/null 2>&1; then
+    fail "web-ui достал до 1.1.1.1:443 — у него появился прямой путь наружу"
   else
-    skip "web-ui не запущен — его проверку egress пропустить"
+    pass "web-ui не достаёт наружу напрямую"
   fi
   if [ "$(container_state halogen-flash-server)" = "running" ]; then
     if $PODMAN exec halogen-flash-server cat /proc/net/route 2>/dev/null \
@@ -393,33 +395,76 @@ sec_B() {
     skip "нет ключа — позитивную часть forward-auth пропущено"
   fi
 
-  # health-маршруты
+  # health-маршруты: /healthz → halogen (в Caddy rewrite на /health), /health →
+  # web-ui (catch-all handle). Заголовком Server они НЕ различаются: оба
+  # приложения — FastAPI/uvicorn, и у обоих в ответе «Server: uvicorn»
+  # (web-ui запускается через uvicorn.run,
+  # /docs/open-webui/backend/open_webui/__init__.py:86). На этом первая версия
+  # проверки и попадалась: она выдавала FAIL, когда всё в порядке.
+  # Различаем телом ответа: у halogen в /health версия и служебные поля
+  # (/docs/halogen-flash-server/docs/api.md:69), у web-ui — строго
+  # {"status":true} (/docs/open-webui/backend/open_webui/main.py:3077).
   expect_code "/healthz открыт с LAN-пути" "200" "$(http_code "$BASE/healthz")"
-  local srv srv2
-  srv=$(header_of server "$BASE/healthz")
-  case "$srv" in
-    *vicorn*) pass "/healthz отвечает halogen (Server: $srv)" ;;
-    "")       info "у /healthz нет заголовка Server" ;;
-    *)        fail "/healthz отвечает не halogen (Server: $srv)" ;;
-  esac
-  srv2=$(header_of server "$BASE/health")
-  case "$srv2" in
-    *vicorn*) fail "/health отвечает halogen — разматч /health ↔ /healthz сломался" ;;
-    "")       info "у /health нет заголовка Server" ;;
-    *)        pass "/health — это web-ui, не halogen (Server: $srv2)" ;;
+  local hz h hz_ver
+  hz=$(http_body "$BASE/healthz")
+  h=$(http_body "$BASE/health")
+  hz_ver=$(printf '%s' "$hz" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -n 1)
+  if [ -z "$hz" ]; then
+    info "у /healthz пустой ответ — различать маршруты нечем"
+  elif [ -n "$hz_ver" ]; then
+    pass "/healthz отвечает halogen (в теле версия $hz_ver)"
+  else
+    fail "/healthz отвечает не halogen — в теле нет версии: $(printf '%s' "$hz" | head -c 70)"
+  fi
+  case "$h" in
+    *'"status"'*) pass "/health — web-ui, а не halogen (в теле {\"status\":…})" ;;
+    "")           info "/health не отвечает — web-ui поднят?" ;;
+    *)            if [ -n "$hz" ] && [ "$h" = "$hz" ]; then
+                    fail "/health и /healthz отдают одно и то же — оба уходят в halogen, разматч сломался"
+                  else
+                    info "у /health непривычный отклик: $(printf '%s' "$h" | head -c 70)"
+                  fi ;;
   esac
 
-  # egress squid: пустой whitelist
+  # egress squid: пустой whitelist. Оценивать нужно КОД ответа, а не то, упало ли
+  # приложение: requests.get() не бросает исключение на 403 — страница отказа
+  # squid это обычный ответ с кодом 403. Первая версия проверки («упал ли
+  # запрос») считала отказ успехом и проваливалась ложно. HTTP и CONNECT
+  # проверяем раздельно: для туннелей в squid отдельное правило
+  # `allow CONNECT allowed_sites` (config/squid/squid.conf:29), и внутри
+  # туннеля Content-Type уже не фильтруется.
   local wl
   wl=$(grep -v '^[[:space:]]*#' config/squid/whitelist.txt 2>/dev/null | grep -c '[^[:space:]]')
-  if [ "${wl:-0}" = "0" ]; then
-    if $PODMAN exec halogen-web-ui python -c "import requests;requests.get('http://example.org',timeout=10)" >/dev/null 2>&1; then
-      fail "web-ui сходил в example.org при пустом whitelist — squid не фильтрует"
-    else
-      pass "пустой whitelist: web-ui наружу не ходит"
-    fi
-  else
+  if [ "${wl:-0}" != "0" ]; then
     skip "в whitelist $wl записей — проверку пустого whitelist прогонять на пустом"
+  elif [ "$py_ok" != 1 ]; then
+    skip "в web-ui нет python/requests — проверку squid изнутри контейнера пропустить"
+  else
+    local py_http py_https code code_tls
+    py_http='import requests
+print(requests.get("http://example.org", timeout=10).status_code)'
+    py_https='import requests
+try:
+    print("tunnel:" + str(requests.get("https://example.org", timeout=10).status_code))
+except requests.exceptions.ProxyError:
+    print("refused")
+except requests.exceptions.RequestException as e:
+    print("other:" + type(e).__name__)'
+    code=$($PODMAN exec halogen-web-ui python -c "$py_http" 2>/dev/null | tail -n 1)
+    case "$code" in
+      403)  pass "пустой whitelist: squid отклонил GET example.org (403)" ;;
+      200)  fail "пустой whitelist: squid ПРОПУСТИЛ example.org (200) — фильтр не работает" ;;
+      "")   info "example.org через squid: ответа нет — прокси недоступен из web-ui?" ;;
+      *)    info "example.org через squid: неожиданный код $code" ;;
+    esac
+    code_tls=$($PODMAN exec halogen-web-ui python -c "$py_https" 2>/dev/null | tail -n 1)
+    case "$code_tls" in
+      refused)    pass "пустой whitelist: squid отклонил и CONNECT (TLS-туннель на 443)" ;;
+      tunnel:200) fail "пустой whitelist: squid пустил TLS-туннель в example.org — allow CONNECT слишком широкий" ;;
+      tunnel:*)   info "CONNECT example.org прошёл, ответ источника: $code_tls" ;;
+      other:*)    info "CONNECT example.org: туннель не открылся по причине ${code_tls#other:} (проверить маршрут squid наружу)" ;;
+      *)          info "CONNECT example.org: непонятный результат '$code_tls'" ;;
+    esac
   fi
 
   # справочно: SELinux на сервере нет (AppArmor), см. CLAUDE.md §5

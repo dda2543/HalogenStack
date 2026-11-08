@@ -200,6 +200,13 @@ node-exporter, blackbox-exporter, prometheus, grafana.
   `~/.claude/projects/-workspace-src/memory/` создать не выходит (проверено
   2026-10-28). Всё, что «сохранить на потом», идёт только в этот файл и в
   `docs/` — отдельного хранилища фактов у агента нет.
+- **`/tmp` — tmpfs с `noexec`** (проверено 2026-11-09 по `/proc/mounts`), а
+  `chmod` запрещён: файл, созданный там, не исполняется — даже если задать бит 755
+  сразу при создании (`node: fs.writeFileSync(…, {mode:0o755})`), `exec` даёт
+  `Permission denied`. Практика для прогонов `scripts/check.sh`: подставные
+  `curl`/`podman` делать **экспортируемыми bash-функциями**
+  (`export -f curl podman` — дочерний bash их наследует), а не файлами в `PATH`:
+  `command -v` внутри скрипта функции видит.
 - Git в контейнере: `GIT_CONFIG_GLOBAL=/tmp/gitconfig` и
   `-c safe.directory=/workspace/src`; `chmod` запрещён. Наружу из контейнера
   только `HTTP_PROXY`, поэтому `git fetch`/`ls-remote` не работают (remote по
@@ -855,7 +862,10 @@ SKIP. Мёртвый хелпер `header_of` удалён.
 
 Правки: `scripts/check.sh` (health-маршруты по телу, squid по коду + CONNECT,
 проба python), `docs/server-test-checklist.md` (в §B те же два заблуждения в
-ручных командах, в §0 — итоги прогона), `CLAUDE.md` (§5, §10). В контейнере
+ручных командах, в §0 — итоги прогона), `docs/admin-whitelist.md` (там то же
+заблуждение про «ожидаем ошибку» на не-whitelisted домене: 403 — не ошибка для
+`requests`), `CLAUDE.md` (§3 — `/tmp` noexec и как делать подставные
+`curl`/`podman`, §5, §10). В контейнере
 агента прогон на подставных `curl`/`podman` (их тут нет): номинал
 `PASS 38 · FAIL 0`, и пять негативных сценариев ведутся правильно (`/health`
 тоже halogen → FAIL, `/healthz` отвечает web-ui → FAIL, squid пропускает HTTP и

@@ -77,3 +77,5 @@
 - [docs/admin-server-ubuntu.md](docs/admin-server-ubuntu.md) — сервер LLM: адресация VLAN и WireGuard для агентов.
 - [docs/admin-client-macos.md](docs/admin-client-macos.md) — ноутбук агента: WireGuard + доступ к API.
 - [docs/server-test-checklist.md](docs/server-test-checklist.md) — прогон на сервере перед тем, как считать фазу 1 зелёной.
+- `scripts/check.sh` — автоматизированная часть того чек-листа: `bash scripts/check.sh`
+  (ключи берёт из окружения и `secrets/keys.acl`, ничего не меняет).

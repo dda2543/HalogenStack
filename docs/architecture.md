@@ -32,7 +32,7 @@
 
 | Сервис | Образ | Сети | Порты на хосте |
 |---|---|---|---|
-| halogen-flash-server | `ghcr.io/peonist-ai/halogen-flash-server:0.18.15` | internal | — |
+| halogen-flash-server | `ghcr.io/peonist-ai/halogen-flash-server:0.20.0` | internal | — |
 | reverse-proxy | Caddy 2 | internal, public | `LAN_IP:8731` |
 | internal-auth-provider | своя сборка (node) | internal | — |
 | web-ui | Open WebUI | internal, egress | — |
@@ -142,6 +142,13 @@
 - SSE-стриминг LLM сквозь reverse-proxy (без буферизации, без WAF на этом пути).
 - Open WebUI: `HTTP_PROXY`/`NO_PROXY` (внутренние адреса — мимо squid).
 - bind reverse-proxy `8731` на LAN-интерфейс (не на 0.0.0.0).
+- Пин подняли с 0.18.15 на 0.20.0 (2026-11-08, на сервере ещё не поднимался).
+  Образ 0.20.0 собран на ROCm 10.1 с перенастроенным GEMM: проверить чистый
+  старт на хостовом драйвере и что скорость не просела. Ответы могут отличаться
+  от 0.18.15 в последних битах — это ожидаемо, а не регрессия.
+- С 0.19.0 API-порт halogen слушает IPv4 и IPv6 (`--host ::`). Для нас нейтрально
+  (у halogen нет проброса на хост), но `ss -ltnp` по-прежнему обязан давать ровно
+  один слушатель — `LAN_IP:8731` от reverse-proxy.
 
 ## 8. Roadmap (детали: CLAUDE.md §9)
 

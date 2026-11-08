@@ -22,7 +22,7 @@ volumes:
 
 services:
   halogen-flash-server:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.18.15
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.20.0
     container_name: halogen-flash-server
     restart: unless-stopped
     networks: [internal]
@@ -55,16 +55,22 @@ services:
       # Claude Code разросся до 42 GiB за 14 минут — 28 разговоров по ~1.4 GiB,
       # при 33 GiB свободного места на разделе. HALOGEN_CACHE_DISK_GIB=64 был
       # больше свободного места, поэтому LRU-чистка не включалась никогда.
-      # Цена отказа: после рестарта все разговоры холодные (32k ≈ 40 с prefill).
+      # Цена отказа: после рестарта все разговоры холодные — реальные сессии
+      # Claude Code здесь 123–128k токенов, значит prefill 2–2.5 минуты.
       # Возврат — раскомментировать и вернуть том /cache ниже; DISK_GIB взять
       # заметно меньше свободного места раздела, а не дефолтные 64.
       # HALOGEN_CACHE_DIR: /cache
       # HALOGEN_CACHE_DISK_GIB: "16"
-      # Образ сам ставит HALOGEN_FORK=1 и HALOGEN_FORK_MAP=auto, если они не
-      # заданы (reference deploy/entrypoint.sh:1000-1001). Каждое keep-состояние
-      # держит ~0.11 GiB RAM и позиции KV-пула, а Claude Code заголовки
-      # X-Halogen-Keep/From не шлёт — fork нам не нужен. Выключен ЯВНО: одних
-      # закомментированных переменных выше мало, значение должен видеть образ.
+      # Образ по-прежнему сам ставит HALOGEN_FORK=1, если переменная не задана
+      # (reference deploy/entrypoint.sh:1014), — значение должен видеть образ,
+      # одних закомментированных переменных выше мало. Auto-keep
+      # (HALOGEN_FORK_MAP=auto) с 0.18.16 выключен самим апстримом (#207, #208),
+      # так что прежняя причина «образ включает auto-keep и раздувает /cache» на
+      # этом пине уже не действует. При 1 остаются живы именованные keep-состояния
+      # по заголовку X-Halogen-Keep, а их имена — общее пространство для всех
+      # ключей сервера (reference FLAGS.md:157). Claude Code эти заголовки не
+      # шлёт, поэтому держим 0: механизм не используется и не плодит состояния
+      # (~0.1 GiB RAM + позиции KV-пула на каждое, reference FLAGS.md:160).
       HALOGEN_FORK: "0"
     volumes:
       - ${HALOGEN_MODELS_DIR}:/models:ro

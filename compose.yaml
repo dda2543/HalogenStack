@@ -22,7 +22,7 @@ volumes:
 
 services:
   halogen-flash-server:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.20.0
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.20.4
     container_name: halogen-flash-server
     restart: unless-stopped
     networks: [internal]

@@ -316,21 +316,32 @@ sec_A() {
 }
 
 sec_A1() {
-  section "A1. Регрессии после обновления образа (0.19.1 / 0.20.0)"
+  section "A1. Регрессии после обновления образа (0.19.1 / 0.20.0 / 0.20.1–0.20.4)"
 
   # Давление KV-пула и prompt-кэша за всю жизнь контейнера. Порог тревоги из
   # CLAUDE.md §5: вытеснение записей кэша вместе с пулом на 9x% означает, что
   # не хватает пула или слотов. Это не PASS/FAIL — размером пула решает человек,
   # здесь только цифры.
-  local alllog forgot clamped poolmax
+  local alllog forgot clamped cut poolmax
   alllog=$($PODMAN logs 2>&1 halogen-flash-server)
   forgot=$(printf '%s' "$alllog" | grep -c 'prompt cache: at its .*forgot')
+  # Два РАЗНЫХ признака нехватки пула, их нельзя смешивать (CHANGELOG 0.20.1):
+  #   «cannot grow and nothing holds a move» — до 0.20.0 печаталась на stderr и
+  #     выглядела как ошибка, но с 0.20.1 объявлена РУТИННОЙ (stdout): ход,
+  #     дошедший до этого места, наращивает регион и получает свои max_tokens;
+  #   «was shortened by the room its region had left» — с 0.20.1 единственный
+  #     точный признак того, что ход действительно получил меньше.
+  # Считать только первую — значит молча получать ноль на 0.20.1+.
   clamped=$(printf '%s' "$alllog" | grep -c 'cannot grow and nothing holds a move')
+  cut=$(printf '%s' "$alllog" | grep -c 'was shortened by the room its region had left')
   poolmax=$(printf '%s' "$alllog" | grep -o 'pool [0-9]*/[0-9]* [0-9]*%' \
             | awk '{gsub("%","",$3); if ($3>m) m=$3} END {print m+0}')
-  info "за жизнь контейнера: prompt-кэш вытеснил записей ${forgot:-0}, turn'ов с урезанным max_tokens ${clamped:-0}, пик пула ${poolmax:-0}%"
-  if [ "${clamped:-0}" != "0" ]; then
-    info "  'cannot grow' = генерации не хватило места, max_tokens урезан апстримом (вопрос о размере пула — §7)"
+  info "за жизнь контейнера: prompt-кэш вытеснил записей ${forgot:-0}, пик пула ${poolmax:-0}%"
+  info "  ходов 'cannot grow' ${clamped:-0}, реально урезано ('was shortened', признак с 0.20.1) ${cut:-0}"
+  if [ "${cut:-0}" != "0" ]; then
+    info "  'was shortened' = ход получил меньше max_tokens/thinking-бюджета — это и есть цифра для вопроса о размере пула (§7)"
+  elif [ "${clamped:-0}" != "0" ]; then
+    info "  на 0.20.0 строка 'cannot grow' двусмысленна (с 0.20.1 она рутинна), точного признака обреза в этом логе нет"
   fi
 
   if [ "$NO_LLM" = 1 ]; then skip "--no-llm: проверки с запросами пропущены"; return 0; fi

@@ -15,7 +15,23 @@ WHITELIST := config/squid/whitelist.txt
 # и отклонил бы валидный запуск.
 GUARD_LAN_IP = if [ -n "$${LAN_IP+x}" ]; then test -n "$$LAN_IP" || { echo "LAN_IP передан пустым окружением — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }; else grep -qE '^[[:space:]]*(export[[:space:]]+)?LAN_IP[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null || { echo "LAN_IP не задан ни в окружении, ни в .env — порт 8731 опубликовался бы на 0.0.0.0"; exit 1; }; fi
 
-.PHONY: init up down build logs ps key-add key-rotate key-rm key-list whitelist-add whitelist-rm whitelist-list
+# Дисковый prompt-кэш (решение 2026-11-12) обязан лежать на выделенном диске:
+# в 2026-10-28 он съел 42 GiB на / и чуть не убил раздел. Проверки три, по
+# образцу GUARD_LAN_IP:
+#   1) HALOGEN_CACHE_DIR_HOST задан (пустое значение из окружения — отдельное
+#      сообщение: оно перебивает .env так же, как у LAN_IP);
+#   2) путь сам является точкой монтирования ИЛИ его родитель является — то
+#      есть под ним реально примонтирован диск, а не каталог на /;
+#   3) устройство этого пути ОТЛИЧАЕТСЯ от устройства /: иначе «каталог прямо в
+#      /» (например /cache) проходил бы по проверке 2 — / тоже точка монтирования.
+# Канон: диск смонтирован в /srv/halogen-cache, кэш в /srv/halogen-cache/
+# prompt-cache. Сам prompt-cache существует только на новом диске, поэтому без
+# монтирования podman не смог бы его создать (родитель принадлежит root, 0755) —
+# guard лишь даёт внятное сообщение вместо этой ошибки. Разметка диска:
+# docs/admin-cache-disk.md.
+GUARD_CACHE_DIR = if [ -n "$${HALOGEN_CACHE_DIR_HOST+x}" ]; then test -n "$$HALOGEN_CACHE_DIR_HOST" || { echo "HALOGEN_CACHE_DIR_HOST передан пустым окружением — кэш уехал бы на корневой раздел"; exit 1; }; d="$$HALOGEN_CACHE_DIR_HOST"; else d=$$(grep -E '^[[:space:]]*(export[[:space:]]+)?HALOGEN_CACHE_DIR_HOST[[:space:]]*=' .env 2>/dev/null | tail -n 1 | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$$//; s/^"(.*)"$$/\1/'); if [ -z "$$d" ]; then echo "HALOGEN_CACHE_DIR_HOST не задан ни в окружении, ни в .env — кэш уехал бы на корневой раздел"; exit 1; fi; fi; p="$$d"; mountpoint -q "$$p" 2>/dev/null || p="$$(dirname "$$d")"; if ! mountpoint -q "$$p" 2>/dev/null; then echo "каталог кэша $$d не на примонтированном устройстве ($$p — не точка монтирования): поднимите диск, см. docs/admin-cache-disk.md"; exit 1; fi; r=$$(df -P / 2>/dev/null | awk 'NR==2 {print $$1}'); c=$$(df -P "$$p" 2>/dev/null | awk 'NR==2 {print $$1}'); if [ -z "$$r" ] || [ -z "$$c" ] || [ "$$r" = "$$c" ]; then echo "каталог кэша $$d лежит на том же устройстве, что и / ($${c:-неизвестно}) — нужен выделенный диск, иначе повторится сценарий 2026-10-28"; exit 1; fi
+
+.PHONY: init up down build logs ps cache-info key-add key-rotate key-rm key-list whitelist-add whitelist-rm whitelist-list
 
 init: ## создать пустой secrets/keys.acl и .env из примеров
 	@test -f $(KEYS) || (install -m 600 secrets/keys.acl.example $(KEYS) && echo "создан $(KEYS) (пустой): добавьте ключи — make key-add NAME=...")
@@ -23,6 +39,7 @@ init: ## создать пустой secrets/keys.acl и .env из пример�
 
 up: ## поднять стек (build + up -d)
 	@$(GUARD_LAN_IP)
+	@$(GUARD_CACHE_DIR)
 	$(COMPOSE) -f compose.yaml up -d --build
 down: ## остановить стек
 	$(COMPOSE) -f compose.yaml down
@@ -32,6 +49,14 @@ logs: ## логи всех сервисов
 	$(COMPOSE) -f compose.yaml logs -f --tail=100
 ps: ## статус контейнеров
 	$(COMPOSE) -f compose.yaml ps
+
+# Переменная d остаётся заданной в этом же шелле: рецепт — одна команда.
+cache-info: ## состояние дискового prompt-кэша (устройство, занято, размер каталога)
+	@$(GUARD_CACHE_DIR); \
+	echo "каталог кэша: $$d"; \
+	mountpoint "$$d" 2>/dev/null || mountpoint "$$(dirname "$$d")"; \
+	df -h "$$d" 2>/dev/null | tail -n 2; \
+	printf 'размер каталога: '; du -sh "$$d" 2>/dev/null | cut -f1
 
 # --- Ключи пользователей (auth-provider перечитывает keys.acl по mtime) ---
 
@@ -92,6 +117,7 @@ waf-build: ## собрать образ waf-firewall (Caddy + Coraza + CRS; ну
 
 public-up: ## фаза 1 + waf-firewall (публичный вход)
 	@$(GUARD_LAN_IP)
+	@$(GUARD_CACHE_DIR)
 	$(COMPOSE) $(PUBLIC_COMPOSE) up -d --build
 
 public-down: ## снять всё вместе с фазой 2

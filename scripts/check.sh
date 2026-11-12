@@ -26,7 +26,7 @@
 #
 # Настройки читаются из окружения (оно побеждает) и из .env — как их читает
 # podman-compose: LAN_IP, PUBLIC_DOMAIN, SECRETS_DIR, CERTS_DIR,
-# WEBUI_SERVICE_KEY.
+# WEBUI_SERVICE_KEY, HALOGEN_CACHE_DIR_HOST.
 #
 # Скрипт ничего не меняет: читает состояние контейнеров и дёргает HTTP.
 
@@ -221,7 +221,9 @@ sec_A() {
     fail "версия halogen: в ответе '$got', в compose.yaml пин '$want'"
   fi
 
-  # prompt-кэш только в RAM (решение 2026-10-28)
+  # Дисковый prompt-кэш (решение 2026-11-12): включён и лежит на выделенном
+  # диске. ВНИМАНИЕ: до этой даты проверка требовала обратного (RAM-only,
+  # решение 2026-10-28) — утверждения ниже инвертированы.
   local envjson mounts
   envjson=$($PODMAN inspect -f '{{json .Config.Env}}' halogen-flash-server 2>/dev/null)
   if printf '%s' "$envjson" | grep -q 'HALOGEN_FORK=0'; then
@@ -229,21 +231,55 @@ sec_A() {
   else
     fail "HALOGEN_FORK=0 не найден в окружении контейнера"
   fi
-  if printf '%s' "$envjson" | grep -q 'HALOGEN_CACHE_DIR'; then
-    fail "HALOGEN_CACHE_DIR задан — дисковый prompt-кэш включён (решение §1.2: только RAM)"
+  if printf '%s' "$envjson" | grep -q 'HALOGEN_CACHE_DIR=/cache'; then
+    pass "HALOGEN_CACHE_DIR=/cache — дисковый prompt-кэш включён"
   else
-    pass "HALOGEN_CACHE_DIR отсутствует (дискового кэша нет)"
+    fail "HALOGEN_CACHE_DIR=/cache не найден в окружении — дискового кэша нет (решение 2026-11-12)"
+  fi
+  # Лимит обязан быть задан и быть ненулевым: 0 = без границ, а дефолт 64 в
+  # 2026-10-28 оказался больше свободного места — LRU не включился ни разу.
+  local gib; gib=$(printf '%s' "$envjson" | grep -o 'HALOGEN_CACHE_DISK_GIB=[0-9]\+' | head -n 1 | cut -d= -f2)
+  case "$gib" in
+    ""|"0") fail "HALOGEN_CACHE_DISK_GIB='${gib:-не задан}' — без лимита поддерево не ограничено (у нас 640)" ;;
+    *)      pass "HALOGEN_CACHE_DISK_GIB=$gib" ;;
+  esac
+  if printf '%s' "$envjson" | grep -q 'HALOGEN_CACHE_PRUNE_OLD=1'; then
+    pass "HALOGEN_CACHE_PRUNE_OLD=1 — поддеревья старых сборок вычищаются на старте"
+  else
+    fail "HALOGEN_CACHE_PRUNE_OLD не включён — старые поддеревья после апгрейдов копятся незафиксированно"
   fi
   mounts=$($PODMAN inspect -f '{{json .Mounts}}' halogen-flash-server 2>/dev/null)
   if printf '%s' "$mounts" | grep -q '"Destination":"/cache"'; then
-    fail "том /cache примонтирован — его убрали 2026-10-28"
+    pass "том /cache примонтирован"
   else
-    pass "тома /cache нет"
+    fail "тома /cache нет — писать дисковому кэшу некуда"
   fi
-  if [ -d ./cache ] && [ -n "$(ls -A ./cache 2>/dev/null)" ]; then
-    fail "на хосте есть непустой ./cache ($(du -sh ./cache 2>/dev/null | cut -f1)) — дисковый кэш всё-таки пишется"
+  # Каталог на хосте: задан, существует и НЕ на разделе / (иначе повторится
+  # сценарий 2026-10-28). Устройство сравниваем по df -P: /dev/mapper/… против
+  # /dev/nvme0n1p1.
+  local cachedir dev_root dev_cache
+  cachedir=$(cfg_get HALOGEN_CACHE_DIR_HOST)
+  if [ -z "$cachedir" ]; then
+    fail "HALOGEN_CACHE_DIR_HOST не задан ни в окружении, ни в $ENV_FILE"
+  elif [ ! -d "$cachedir" ]; then
+    fail "каталога кэша нет: $cachedir (создать и chown — docs/admin-cache-disk.md)"
   else
-    pass "./cache на хосте не создаётся"
+    dev_root=$(df -P / 2>/dev/null | awk 'NR==2 {print $1}')
+    dev_cache=$(df -P "$cachedir" 2>/dev/null | awk 'NR==2 {print $1}')
+    if [ -z "$dev_cache" ]; then
+      fail "не удалось определить устройство для $cachedir"
+    elif [ "$dev_cache" = "$dev_root" ]; then
+      fail "каталог кэша $cachedir лежит на разделе / ($dev_root) — нужен выделенный диск"
+    else
+      pass "каталог кэша $cachedir на устройстве $dev_cache (не /)"
+      info "размер кэша: $(du -sh "$cachedir" 2>/dev/null | cut -f1) при лимите ${gib:-?} GiB"
+    fi
+  fi
+  # Старый каталог в каталоге проекта — признак, что кэш снова пишет не туда.
+  if [ -d ./cache ] && [ -n "$(ls -A ./cache 2>/dev/null)" ]; then
+    fail "на хосте есть непустой ./cache ($(du -sh ./cache 2>/dev/null | cut -f1)) — кэш пишется в каталог проекта"
+  else
+    pass "старый ./cache в каталоге проекта не создаётся"
   fi
 
   # место на разделе (справочно: модели и логи тоже чего-то стоят)

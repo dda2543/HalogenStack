@@ -288,13 +288,17 @@ sec_A() {
     if [ "$used" -ge 90 ]; then info "занято / : $used% — тесно"; else info "занято / : $used%"; fi
   fi
 
-  # Лог старта читаем из НАЧАЛА лога контейнера, ошибки — из конца. `--tail 300`
-  # для стартовых строк не годится: на загруженном сервере 300 строк — это
-  # несколько минут работы, и warm start с 'listening on' уезжают из окна
-  # (проверено 2026-11-09: в полном логе строки есть, в хвосте их уже нет).
-  local log errlog
-  log=$($PODMAN logs 2>&1 halogen-flash-server | head -n 200)
-  errlog=$($PODMAN logs --tail 300 halogen-flash-server 2>&1)
+  # Лог старта читаем из НАЧАЛА лога контейнера. `--tail 300` для стартовых
+  # строк не годится: на загруженном сервере 300 строк — это несколько минут
+  # работы, и warm start с 'listening on' уезжают из окна (проверено 2026-11-09:
+  # в полном логе строки есть, в хвосте их уже нет). Ошибки же теперь читаются из
+  # ВСЕГО лога: на свежем контейнере весь лог короче 300 строк, и в «хвост»
+  # попадает штатная строка `oom_score_adj 0 -> 500: if the host runs out of
+  # memory, …` — на ней поиск по `out of memory` и давал ложный FAIL (проверено
+  # 2026-11-12, первый же подъём 0.20.4).
+  local alllog log
+  alllog=$($PODMAN logs 2>&1 halogen-flash-server)
+  log=$(printf '%s\n' "$alllog" | head -n 200)
   if printf '%s' "$log" | grep -q 'warm start'; then
     pass "warm start 0.18.23 в логе: $(printf '%s' "$log" | grep -m1 'warm start' | cut -c1-90)"
   else
@@ -308,10 +312,36 @@ sec_A() {
   if printf '%s' "$log" | grep -q 'on_event'; then
     info "в логе осталось предупреждение on_event (в 0.19.1 его убрали)"
   fi
-  if printf '%s' "$errlog" | grep -qiE 'hipError|HSA_STATUS_ERROR|out of memory|CUDA error'; then
-    fail "в логе halogen есть строки про ошибки ROCm/HIP/память"
+  # Диск подхвачен именно движком, а не только описан в env/томах. Без этой
+  # строки HALOGEN_CACHE_DIR означает «кэш остался в RAM»: halogen требует ФС с
+  # direct I/O и отвергает tmpfs/overlay, оставляя prompt-кэш в памяти.
+  if printf '%s' "$log" | grep -q 'prompt cache on DISK at'; then
+    pass "$(printf '%s' "$log" | grep -m1 'prompt cache on DISK at' | cut -c1-150)"
   else
-    pass "ошибок ROCm/HIP/OOM в последних 300 строках лога нет"
+    fail "в логе старта нет 'prompt cache on DISK at' — HALOGEN_CACHE_DIR задан, но движок пишет не на диск (direct I/O, права на каталог)"
+  fi
+  local pc; pc=$(printf '%s' "$log" | grep -m1 'prompt cache ON' | grep -o '[0-9]\+ entries' | head -n 1)
+  if [ -n "$pc" ]; then
+    info "записей prompt-кэша: $pc (с 0.20.1 на одну на слот больше — при 4 слотах 28)"
+  fi
+  # Не ошибка, но объяснение медленного prefill: чужая память до старта вычитается
+  # из file cache, где живёт n-gram-таблица 47.7 GiB.
+  local ramwarn; ramwarn=$(printf '%s' "$log" | grep -m1 'of host RAM is in use before this server starts')
+  if [ -n "$ramwarn" ]; then
+    info "$(printf '%s' "$ramwarn" | cut -c1-150)"
+    info "  (не ошибка: эти гигабайты вычитаются из file cache n-gram-таблицы — отсюда медленный prefill)"
+  fi
+
+  # Ошибки — по всему логу, и со снятием заведомо штатных строк: `oom_score_adj
+  # 0 -> 500: if the host runs out of memory, the kernel ends this server…`
+  # печатается при каждом старте и содержит фразу «out of memory».
+  local errhits
+  errhits=$(printf '%s' "$alllog" | grep -iE 'hipError|HSA_STATUS_ERROR|CUDA error|GPU memory fault|oom-kill|Killed process|out of memory' | grep -v 'oom_score_adj' | head -n 3)
+  if [ -n "$errhits" ]; then
+    fail "в логе halogen есть строки про ошибки ROCm/HIP/память"
+    printf '%s\n' "$errhits" | cut -c1-160 | sed 's/^/       /'
+  else
+    pass "ошибок ROCm/HIP/OOM во всём логе контейнера нет"
   fi
 }
 
@@ -341,7 +371,7 @@ sec_A1() {
   if [ "${cut:-0}" != "0" ]; then
     info "  'was shortened' = ход получил меньше max_tokens/thinking-бюджета — это и есть цифра для вопроса о размере пула (§7)"
   elif [ "${clamped:-0}" != "0" ]; then
-    info "  на 0.20.0 строка 'cannot grow' двусмысленна (с 0.20.1 она рутинна), точного признака обреза в этом логе нет"
+    info "  ни одного 'was shortened': на 0.20.1+ это значит, что реальных обрезов не было; на 0.20.0 и старше строка 'cannot grow' двусмысленна (точного признака в логе нет)"
   fi
 
   if [ "$NO_LLM" = 1 ]; then skip "--no-llm: проверки с запросами пропущены"; return 0; fi

@@ -199,7 +199,9 @@ bash scripts/check.sh --self-test      # самопроверка парсеро
       отменяет RAM-only 2026-10-28):
       `podman inspect halogen-flash-server --format '{{json .Config.Env}}' | tr ',' '\n' | grep -iE 'FORK|CACHE'`
       → видны `HALOGEN_FORK=0`, `HALOGEN_CACHE_DIR=/cache`,
-      `HALOGEN_CACHE_DISK_GIB=640`, `HALOGEN_CACHE_PRUNE_OLD=1`; том `/cache`
+      `HALOGEN_CACHE_DISK_GIB=640`, `HALOGEN_CACHE_PRUNE_OLD=1`,
+      `HALOGEN_CACHE_BRANCHES=3` (решение 2026-11-12 — веер субагентов,
+      записей prompt-кэша 28 → 36); том `/cache`
       присутствует в `podman inspect halogen-flash-server --format
       '{{json .Mounts}}'`.
 - [ ] **Главная проверка диска — в логе старта** (подтверждено 2026-11-12):
@@ -267,7 +269,8 @@ bash scripts/check.sh --self-test      # самопроверка парсеро
 - [x] 0.20.1 — записей prompt-кэша стало **28** вместо 24, и строка KV budget
       показывает **3.1 GiB prompt cache in RAM** вместо 2.7 (подтверждено
       2026-11-12: `prompt cache ON, resume-anywhere (28 entries, … 111 MiB each
-      at ctx 262144)`).
+      at ctx 262144)`). После `HALOGEN_CACHE_BRANCHES=3` (тот же день) ждём
+      **36 записей ≈ 3.9 GiB**: формула `слоты × (3 + 2×ветвления)`.
 - [ ] 0.20.1 — **конец каждого ответа кэшируется** (`HALOGEN_CACHE_REPLY`,
       по умолчанию 1, описания в `FLAGS.md` нет — только в `entrypoint.sh`):
       +1 запись prompt-кэша на слот, ~112 MiB каждая, только RAM. При наших

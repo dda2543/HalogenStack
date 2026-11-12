@@ -248,6 +248,13 @@ sec_A() {
   else
     fail "HALOGEN_CACHE_PRUNE_OLD не включён — старые поддеревья после апгрейдов копятся незафиксированно"
   fi
+  # Ветвления 3 — под веер Claude Code с субагентами (решение 2026-11-12):
+  # при дефолтных 2 точка возобновления родителя заменяется записями детей.
+  if printf '%s' "$envjson" | grep -q 'HALOGEN_CACHE_BRANCHES=3'; then
+    pass "HALOGEN_CACHE_BRANCHES=3 — родитель возобновляется после веера субагентов"
+  else
+    fail "HALOGEN_CACHE_BRANCHES не равен 3 — дефолтные 2 ломают возобновление родителя после субагентов"
+  fi
   mounts=$($PODMAN inspect -f '{{json .Mounts}}' halogen-flash-server 2>/dev/null)
   if printf '%s' "$mounts" | grep -q '"Destination":"/cache"'; then
     pass "том /cache примонтирован"
@@ -320,9 +327,11 @@ sec_A() {
   else
     fail "в логе старта нет 'prompt cache on DISK at' — HALOGEN_CACHE_DIR задан, но движок пишет не на диск (direct I/O, права на каталог)"
   fi
+  # Число записей по умолчанию = слоты × (3 + 2×ветвления): 4×5=20 до 0.20.1,
+  # 4×7=28 при ветвлениях 2, 4×9=36 при ветвлениях 3.
   local pc; pc=$(printf '%s' "$log" | grep -m1 'prompt cache ON' | grep -o '[0-9]\+ entries' | head -n 1)
   if [ -n "$pc" ]; then
-    info "записей prompt-кэша: $pc (с 0.20.1 на одну на слот больше — при 4 слотах 28)"
+    info "записей prompt-кэша: $pc (формула: слоты × (3 + 2×ветвления) — при 4 слотах и ветвлениях 3 ждём 36)"
   fi
   # Не ошибка, но объяснение медленного prefill: чужая память до старта вычитается
   # из file cache, где живёт n-gram-таблица 47.7 GiB.

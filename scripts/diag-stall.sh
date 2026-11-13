@@ -21,6 +21,7 @@
 #   bash scripts/diag-stall.sh --load-only     # сразу нагрузка (без пассивной)
 #   bash scripts/diag-stall.sh --tokens 16000 --prompt-kib 200
 #   bash scripts/diag-stall.sh --pool-every 5 --probe-every 10
+#   bash scripts/diag-stall.sh --watch 3600   # час пассивного наблюдения в бою
 #   bash scripts/diag-stall.sh --key-name agent1
 #   CHECK_KEY=... bash scripts/diag-stall.sh
 #
@@ -62,10 +63,11 @@ MAX_TIME=900          # потолок на нагрузочный запрос,
 INTERVAL=1            # период сэмплера, с
 PROBE_EVERY=10        # раз в N секунд дёргать «ещё жив ли»
 POOL_EVERY=5          # раз в N секунд снимать пул/очередь из контейнера
+WATCH=0               # >0: пассивное наблюдение N секунд без нагрузочного запроса
 OUTDIR=""
 TIMEOUT=20            # таймаут коротких HTTP-вызовов
 
-usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,6 +79,7 @@ while [ $# -gt 0 ]; do
     --interval)  INTERVAL=${2:?}; shift 2 ;;
     --probe-every) PROBE_EVERY=${2:?}; shift 2 ;;
     --pool-every)  POOL_EVERY=${2:?}; shift 2 ;;
+    --watch)       WATCH=${2:?}; shift 2 ;;
     --outdir)    OUTDIR=${2:?}; shift 2 ;;
     -k|--key-name) KEY_NAME=${2:?}; shift 2 ;;
     -b|--base)   BASE=${2:?}; BASE_SET=1; shift 2 ;;
@@ -152,6 +155,33 @@ LAN=$(cfg_get LAN_IP)
 if [ -z "$LAN" ] && [ "$BASE_SET" = 0 ]; then
   echo "LAN_IP не задан ни в окружении, ни в $ENV_FILE — некуда слать запросы. Запуск из каталога проекта (рядом .env) или --base http://АДРЕС:8731" >&2
 fi
+
+# --- сетевой интерфейс, по которому живёт LAN ----------------------------------
+# Нужен, чтобы сэмплер следил за состоянием именно NIC: «Host is down» у
+# клиента = не отработал ARP, то есть интерфейс лежал, а не halogen.
+detect_nic() {
+  local i n
+  if [ -n "$LAN" ] && command -v ip >/dev/null 2>&1; then
+    n=$(ip -o route get "$LAN" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
+    [ -n "$n" ] && { printf '%s' "$n"; return 0; }
+  fi
+  # запасной путь: сначала тот, что реально up и с линком, потом любой физический
+  local pass
+  for pass in 1 2; do
+    for i in /sys/class/net/*; do
+      case ${i##*/} in
+        lo|veth*|br-*|cni*|tap*|docker*|podman*|virbr*|erspan*|gre*|gretap*|ip6*|dummy*|tun*|wg*|flannel*|kube*|cali*|zebra*|MLO*) continue ;;
+      esac
+      [ -f "$i/operstate" ] || continue
+      if [ "$pass" = 1 ]; then
+        [ "$(cat "$i/operstate" 2>/dev/null)" = "up" ] || continue
+        [ "$(cat "$i/carrier" 2>/dev/null)" = "1" ] || continue
+      fi
+      printf '%s' "${i##*/}"; return 0
+    done
+  done
+}
+NIC=$(detect_nic)
 
 # --- доступные инструменты ---------------------------------------------------
 HAVE_CURL=0; command -v curl >/dev/null 2>&1 && HAVE_CURL=1
@@ -268,6 +298,20 @@ sec_memory() {
   done
   [ -r /proc/pressure/memory ] || skip "/proc/pressure нет (ядро старше 4.8?)"
 
+  # conntrack: переполнение таблицы (podman/nftables держат в ней соединения)
+  # даёт «соединения не устанавливаются» при живом ядре — очень похоже на наш
+  # симптом, и проверяется одной строкой
+  local ctc ctm
+  ctc=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)
+  ctm=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)
+  if [ -n "$ctc" ] && [ -n "$ctm" ]; then
+    if [ "$ctm" -gt 0 ] && [ $((ctc * 100 / ctm)) -ge 80 ]; then
+      warn "conntrack заполнен на $((ctc * 100 / ctm))% ($ctc из $ctm) — новые соединения будут отваливаться"
+    else
+      info "conntrack: $ctc из $ctm ($(( ctc * 100 / ctm ))%)"
+    fi
+  fi
+
   info "нагрузка: $(cat /proc/loadavg)  (nproc = $(nproc 2>/dev/null))"
   local d; d=$(ps -eo stat= 2>/dev/null | grep -c '^D' || true)
   info "процессов в D (uninterruptible sleep) прямо сейчас: ${d:-?} — именно их watchdog отказывается считать клином (FLAGS.md:172)"
@@ -307,6 +351,22 @@ sec_gpu() {
     who=$(fuser -v /dev/kfd 2>/dev/null | tr -s ' \n' ' ')
     if [ -n "$who" ]; then info "/dev/kfd держат: $who"; else info "/dev/kfd никем не держится (или не хватило прав — тогда sudo fuser -v /dev/kfd)"; fi
   fi
+
+  # NIC: «Host is down» у клиента = не отработал ARP → интерфейс лежал.
+  section "3b. Сетевой путь"
+  if [ -z "$NIC" ]; then skip "не определил сетевой интерфейс"; return 0; fi
+  local st car drv
+  st=$(cat "/sys/class/net/$NIC/operstate" 2>/dev/null)
+  car=$(cat "/sys/class/net/$NIC/carrier" 2>/dev/null)
+  drv=$(ethtool -i "$NIC" 2>/dev/null | awk '/^driver:|^firmware-version:|^version:/ {printf "%s ", $2}')
+  info "интерфейс $NIC: operstate=${st:-?} carrier=${car:-?} драйвер: ${drv:-ethtool недоступен}"
+  info "счётчики: $(for f in rx_dropped tx_dropped rx_errors tx_errors rx_missed_errors; do
+                      v=$(cat "/sys/class/net/$NIC/statistics/$f" 2>/dev/null); [ -n "$v" ] && printf '%s=%s ' "$f" "$v"; done)"
+  if [ -n "$car" ] && [ "$car" = "0" ]; then warn "carrier=0 — линка физически нет прямо сейчас"
+  elif [ -n "$st" ] && [ "$st" != "up" ]; then warn "operstate=$st — интерфейс не up"
+  else pass "интерфейс $NIC сейчас up и с carrier"
+  fi
+  info "история линка (кто падал): journalctl -k | grep -iE 'link is (down|up)|nic|reset adapter'"
 }
 
 container_state() { $PODMAN inspect -f '{{.State.Status}}' "$1" 2>/dev/null; }
@@ -316,7 +376,7 @@ sec_journal() {
   section "4. Журнал ядра: что машина видела во время зависаний"
 
   if [ "$HAVE_JOURNALCTL" != 1 ]; then skip "journalctl нет"; return 0; fi
-  local pat='hung_task|blocked for more than|amdgpu|kfd|machine check|Out of memory|oom-kill|Killed process|compac|gpu reset|GPU fault|cat_err'
+  local pat='hung_task|blocked for more than|amdgpu|kfd|machine check|Out of memory|oom-kill|Killed process|compac|gpu reset|GPU fault|cat_err|soft lockup|softlockup|rcu.*stall|watchdog: BUG|hard LOCKUP|link is down|link is up|nic .*reset|reset adapter|suspend entry|suspend exit|s2idle|en[a-z0-9]+: Link|eth[0-9]+: Link'
   local b
   for b in "" "-b"; do
     local label="текущая загрузка"
@@ -331,6 +391,32 @@ sec_journal() {
     note "полное: journalctl -k $b | grep -iE '$pat'"
   done
   note "нет строк \`blocked for more than 120 seconds\` при жалобе на зависание = ядро столл не видело, искать в логе halogen и в GPU"
+
+  # Подозрение на suspend: «машина пропала и потом оттаяла» на десктопном
+  # запуске (quiet splash) часто оказывается штатным s2idle, а не зависанием.
+  local sus
+  sus=$(journalctl -k --no-pager 2>/dev/null | grep -iE 'suspend entry|suspend exit|s2idle|PM: suspend' | tail -n 6)
+  if [ -n "$sus" ]; then
+    warn "в журнале есть suspend/resume — «пропадала и оттаивала» может быть штатным сном:"
+    printf '%s\n' "$sus" | sed 's/^/       /'
+  else
+    info "suspend/resume в журнале не замечен (значит падения — не сон)"
+  fi
+  local lnk
+  lnk=$(journalctl -k --no-pager 2>/dev/null | grep -iE 'link is down|link is up|nic .*reset|reset adapter' | tail -n 8)
+  if [ -n "$lnk" ]; then
+    warn "были события линка NIC — сетевой путь падал сам по себе:"
+    printf '%s\n' "$lnk" | sed 's/^/       /'
+  else
+    info "событий линка NIC в журнале нет"
+  fi
+  local pstore
+  pstore=$(ls -A /sys/fs/pstore 2>/dev/null | head -n 5)
+  if [ -n "$pstore" ]; then
+    warn "в pstore есть записи предыдущего падения: $pstore"
+  else
+    info "pstore пуст: ramoops не настроен, следов жёсткого зависания не будет (crashkernel — это kdump, не pstore)"
+  fi
 }
 
 # --- 5. лог контейнера halogen ----------------------------------------------
@@ -434,6 +520,19 @@ sec_api() {
 # от «не отвечает ничего». Коды пишутся как есть: 000 = таймаут или отказ коннекта.
 probe_once() { # $1=epoch
   local ep=$1 r body code t
+  # inner — healthz ИЗНУТРИ контейнера, минуя сетевой стек хоста вовсе. Это
+  # решающая проба: inner живой при мёртвых healthz/gen = halogen в порядке,
+  # лёг сетевой путь (NIC/драйвер/ARP), а не инференс.
+  if [ "$HAVE_PODMAN" = 1 ]; then
+    r=$($PODMAN exec "$CONTAINER" python3 -c \
+      'import urllib.request as u,time
+t=time.time()
+try:
+    print(u.urlopen("http://127.0.0.1:8731/healthz",timeout=20).status, round(time.time()-t,2))
+except Exception as e:
+    print("000", round(time.time()-t,2))' 2>/dev/null)
+    printf '%s\tinner\t%s\n' "$ep" "${r:-000 0}" >> "$PROBE_FILE"
+  fi
   r=$(curl -s -o /dev/null --max-time 20 -w '%{http_code} %{time_total}' "$BASE/healthz" 2>/dev/null)
   printf '%s\thealthz\t%s\n' "$ep" "${r:-000 0}" >> "$PROBE_FILE"
   body=$(printf '{"model":"%s","messages":[{"role":"user","content":"ок"}],"max_tokens":8}' "$MODEL")
@@ -471,7 +570,7 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
   local tsv=$1 per=$2 probe=$3 dur=$4
   local t0 now i=0 last_pool=0
   t0=$(date +%s)
-  printf 'epoch\tload1\tmemavail_kib\tmlocked_kib\tpgscan_direct\tcompact_stall\tpgmajfault\tpsi_mem_some\tpsi_mem_total\tpsi_io_some\tpsi_io_total\tgpbusy\tgtt_gib\tdstate\n' > "$tsv"
+  printf 'epoch\tload1\tmemavail_kib\tmlocked_kib\tpgscan_direct\tcompact_stall\tpgmajfault\tpsi_mem_some\tpsi_mem_total\tpsi_io_some\tpsi_io_total\tgpbusy\tgtt_gib\tdstate\tnic_state\tnic_carrier\tnic_drop\tnic_err\n' > "$tsv"
   while :; do
     now=$(date +%s)
     [ $((now - t0)) -gt "$dur" ] && break
@@ -495,6 +594,15 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
       gtt=$(( $(cat "$d/mem_info_gtt_used" 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
       break
     done
+    # Состояние NIC: «Host is down»/«No route to host» у удалённого клиента =
+    # не отработал ARP, то есть интерфейс лежал. Проверяем прямо по счётчикам.
+    local nst="" ncar="" ndrop="" nerr=""
+    if [ -n "$NIC" ] && [ -d "/sys/class/net/$NIC" ]; then
+      nst=$(cat "/sys/class/net/$NIC/operstate" 2>/dev/null)
+      ncar=$(cat "/sys/class/net/$NIC/carrier" 2>/dev/null)
+      ndrop=$(( $(cat "/sys/class/net/$NIC/statistics/rx_dropped" 2>/dev/null || echo 0) + $(cat "/sys/class/net/$NIC/statistics/tx_dropped" 2>/dev/null || echo 0) ))
+      nerr=$(( $(cat "/sys/class/net/$NIC/statistics/rx_errors" 2>/dev/null || echo 0) + $(cat "/sys/class/net/$NIC/statistics/tx_errors" 2>/dev/null || echo 0) ))
+    fi
     # Проба «ещё жив ли» — В ФОНЕ. Синхронная проба зависла бы вместе с сервером
     # и съела ровно те секунды, ради которых ведётся сэмплер.
     if [ "$probe" != 0 ] && [ $((i % probe)) = 0 ] && [ -n "$KEY" ]; then
@@ -506,13 +614,117 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
       last_pool=$now
       pool_once "$now" &
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$now" "$la" "$ma" "$mlk" "$psd" "$cs" "$pmf" "$pms" "$pmt" "$pis" "$pit" "$busy" "$gtt" "$ds" >> "$tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$now" "$la" "$ma" "$mlk" "$psd" "$cs" "$pmf" "$pms" "$pmt" "$pis" "$pit" "$busy" "$gtt" "$ds" "$nst" "$ncar" "$ndrop" "$nerr" >> "$tsv"
     i=$((i + 1))
     sleep "$per"
   done
 }
 
+# Сводка по всем трём регистраторам. Вынесена отдельно, чтобы --watch печатал
+# ровно то же, что и нагрузочный прогон.
+print_summaries() { # $1=tsv
+  local tsv=$1
+  # сводка по сэмплеру
+  info "сводка сэмплера ($(($(wc -l < "$tsv") - 1)) отсчётов по ${INTERVAL} с):"
+  awk -F'\t' 'NR>1 {
+      n++
+      if (mn=="" || $3<mn) mn=$3
+      if ($8!="" && $8+0>psm) psm=$8+0
+      if ($10!="" && $10+0>pso) pso=$10+0
+      if ($14+0>dsm) dsm=$14+0
+      if ($12!="" && $12+0>busym) busym=$12+0
+      if ($13!="" && $13+0>gttm) gttm=$13+0
+      if ($15!="" && $15!="up") { notup++; if ($15!="" && $15!="down") nst=$15 }
+      if ($16!="" && $16+0==0) nocar++
+      if (first==0) { first=1; s0=$5; c0=$6; f0=$7; mt0=$9; it0=$11; d0=$17; er0=$18 }
+      e0=$5; e1=$6; e2=$7; e3=$9; e4=$11; d1=$17; er1=$18
+    }
+    END {
+      if (!n) { print "  (пусто)"; exit }
+      printf "  min MemAvailable      = %d GiB\n", mn/1024/1024
+      printf "  delta pgscan_direct   = %d\n", e0-s0
+      printf "  delta compact_stall   = %d\n", e1-c0
+      printf "  delta pgmajfault      = %d  (мажорные промахи = чтение таблицы с диска)\n", e2-f0
+      printf "  PSI memory some max avg10 = %.1f%%   total=%d\n", psm, e3-mt0
+      printf "  PSI io      some max avg10 = %.1f%%   total=%d\n", pso, e4-it0
+      printf "  процессов в D, максимум = %d\n", dsm
+      printf "  gpu_busy max = %s%%   GTT max = %s GiB\n", busym, gttm
+      printf "  NIC: отсчётов не-up = %d, без carrier = %d, delta drop = %d, delta err = %d\n", notup+0, nocar+0, d1-d0, er1-er0
+    }' "$tsv" | sed 's/^/       /'
+
+  # пробы «ещё жив ли» — главный измеряемый симптом. healthz и генерация
+  # разделены: «прокси жив, генерация стоит» и «не отвечает ничего» — разные диагнозы.
+  if [ -s "$PROBE_FILE" ]; then
+    info "пробы «ещё жив ли» (раз в ${PROBE_EVERY} с, параллельно нагрузке):"
+    awk -F'\t' '
+      { split($3, a, " "); c = a[1]; t = a[2] + 0
+        n[$2]++; sum[$2] += t
+        if (t > mx[$2]) { mx[$2] = t; at[$2] = $1; mxc[$2] = c }
+        if (c != "200") { bad[$2]++; codes[$2 " " c]++ } }
+      END {
+        for (k in n)
+          printf "  %-8s всего %d, не-200: %d, средняя %.1f с, самая долгая %.1f с (код %s, в %s)\n",
+                 k, n[k], bad[k]+0, sum[k]/n[k], mx[k], (mxc[k] ? mxc[k] : "-"), strftime("%H:%M:%S", at[k])
+        for (ck in codes) printf "  код%s × %d\n", substr(ck, index(ck, " ")), codes[ck]
+      }' "$PROBE_FILE" | sed 's/^/       /'
+    note "000 = таймаут или отказ коннекта; 4xx/5xx = отказ кто-то вернул (тело первых пяти — в $PROBE_FAIL_DIR)"
+    if [ -d "$PROBE_FAIL_DIR" ] && [ -n "$(ls -A "$PROBE_FAIL_DIR" 2>/dev/null)" ]; then
+      info "тела отказов (первые байты):"
+      for f in "$PROBE_FAIL_DIR"/*; do
+        [ -f "$f" ] || continue
+        printf '       %s: %s\n' "$(basename "$f")" "$(head -c 200 "$f" | tr '\n' ' ')"
+      done
+    fi
+  else
+    skip "проб не было (--probe-every 0 или нет ключа)"
+  fi
+
+  # пул ВО ВРЕМЯ нагрузки — решает вопрос «ждал ли запрос места»
+  if [ -s "$POOL_FILE" ]; then
+    info "пул и очередь во время нагрузки ($(wc -l < "$POOL_FILE") снимков по ${POOL_EVERY} с):"
+    awk -F'\t' '
+      { n++
+        if ($3+0 > mxu) { mxu = $3+0; at = $1 }
+        if ($4+0 > mxw) { mxw = $4+0 }
+        if ($7+0 > mxb) { mxb = $7+0 }
+        if ($10+0 > mxq) { mxq = $10+0 }
+        if (n == 1) { u0 = $10 }
+        last = $10
+      }
+      END {
+        printf "  usage_ratio максимум = %.3f (в %s)\n", mxu, strftime("%H:%M:%S", at)
+        printf "  waiting_for_room максимум = %d\n", mxw
+        printf "  busy_regions максимум = %d\n", mxb
+        printf "  queue_waited_total: %s → %s (выросло за прогон на %s)\n", u0, last, last - u0
+        printf "  queue_wait_longest максимум = %s с\n", mxq
+      }' "$POOL_FILE" | sed 's/^/       /'
+    note "usage_ratio близко к 1 при выросшем queue_waited_total = новые ходы ждали позиции в пуле"
+  fi
+  info "файлы: поток $raw ; сэмплер $tsv ; пробы $PROBE_FILE ; пул $POOL_FILE"
+  note "сэмплер TSV — главный артефакт: колонки 5/6/7 (pgscan_direct, compact_stall, pgmajfault) и 8/10 (PSI) различают память, диск и GPU"
+}
+
+# Пассивное наблюдение: тот же сэмплер, те же пробы и снимки пула, но БЕЗ
+# нагрузочного запроса. Нужен потому, что зависание случается в бою во время
+# работы агентов, а не по заказу. Запуск: bash scripts/diag-stall.sh --watch 3600
+sec_watch() {
+  section "7. Наблюдение ${WATCH} с без нагрузочного запроса"
+  local tsv raw
+  tsv=$(mktemp "${TMPDIR:-/tmp}/diag-samples.XXXXXX.tsv")
+  raw="(нет — режим наблюдения)"
+  PROBE_FILE=$(mktemp "${TMPDIR:-/tmp}/diag-probes.XXXXXX.tsv")
+  POOL_FILE=$(mktemp "${TMPDIR:-/tmp}/diag-pool.XXXXXX.tsv")
+  PROBE_FAIL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/diag-probe-fail.XXXXXX")
+  info "пишу сэмплер, пробы и снимки пула ${WATCH} с; Ctrl-C прерывает и печатает сводку"
+  sampler "$tsv" "$INTERVAL" "$PROBE_EVERY" "$WATCH" &
+  local smp=$!
+  trap "kill $smp 2>/dev/null" INT
+  while kill -0 "$smp" 2>/dev/null; do sleep 2; done
+  wait "$smp" 2>/dev/null
+  trap - INT
+  print_summaries "$tsv"
+}
 sec_load() {
   section "7. Нагрузка: холодный prefill + длинный ответ, с посекундным сэмплером"
 
@@ -640,81 +852,7 @@ sec_load() {
     pass "пауз длиннее 5 с в потоке не было (максимум ${gap:-0} с)"
   fi
 
-  # сводка по сэмплеру
-  info "сводка сэмплера ($(($(wc -l < "$tsv") - 1)) отсчётов по ${INTERVAL} с):"
-  awk -F'\t' 'NR>1 {
-      n++
-      if (mn=="" || $3<mn) mn=$3
-      if ($8!="" && $8+0>psm) psm=$8+0
-      if ($10!="" && $10+0>pso) pso=$10+0
-      if ($14+0>dsm) dsm=$14+0
-      if ($12!="" && $12+0>busym) busym=$12+0
-      if ($13!="" && $13+0>gttm) gttm=$13+0
-      if (first==0) { first=1; s0=$5; c0=$6; f0=$7; mt0=$9; it0=$11 }
-      e0=$5; e1=$6; e2=$7; e3=$9; e4=$11
-    }
-    END {
-      if (!n) { print "  (пусто)"; exit }
-      printf "  min MemAvailable      = %d GiB\n", mn/1024/1024
-      printf "  delta pgscan_direct   = %d\n", e0-s0
-      printf "  delta compact_stall   = %d\n", e1-c0
-      printf "  delta pgmajfault      = %d  (мажорные промахи = чтение таблицы с диска)\n", e2-f0
-      printf "  PSI memory some max avg10 = %.1f%%   total=%d\n", psm, e3-mt0
-      printf "  PSI io      some max avg10 = %.1f%%   total=%d\n", pso, e4-it0
-      printf "  процессов в D, максимум = %d\n", dsm
-      printf "  gpu_busy max = %s%%   GTT max = %s GiB\n", busym, gttm
-    }' "$tsv" | sed 's/^/       /'
-
-  # пробы «ещё жив ли» — главный измеряемый симптом. healthz и генерация
-  # разделены: «прокси жив, генерация стоит» и «не отвечает ничего» — разные диагнозы.
-  if [ -s "$PROBE_FILE" ]; then
-    info "пробы «ещё жив ли» (раз в ${PROBE_EVERY} с, параллельно нагрузке):"
-    awk -F'\t' '
-      { split($3, a, " "); c = a[1]; t = a[2] + 0
-        n[$2]++; sum[$2] += t
-        if (t > mx[$2]) { mx[$2] = t; at[$2] = $1; mxc[$2] = c }
-        if (c != "200") { bad[$2]++; codes[$2 " " c]++ } }
-      END {
-        for (k in n)
-          printf "  %-8s всего %d, не-200: %d, средняя %.1f с, самая долгая %.1f с (код %s, в %s)\n",
-                 k, n[k], bad[k]+0, sum[k]/n[k], mx[k], (mxc[k] ? mxc[k] : "-"), strftime("%H:%M:%S", at[k])
-        for (ck in codes) printf "  код%s × %d\n", substr(ck, index(ck, " ")), codes[ck]
-      }' "$PROBE_FILE" | sed 's/^/       /'
-    note "000 = таймаут или отказ коннекта; 4xx/5xx = отказ кто-то вернул (тело первых пяти — в $PROBE_FAIL_DIR)"
-    if [ -d "$PROBE_FAIL_DIR" ] && [ -n "$(ls -A "$PROBE_FAIL_DIR" 2>/dev/null)" ]; then
-      info "тела отказов (первые байты):"
-      for f in "$PROBE_FAIL_DIR"/*; do
-        [ -f "$f" ] || continue
-        printf '       %s: %s\n' "$(basename "$f")" "$(head -c 200 "$f" | tr '\n' ' ')"
-      done
-    fi
-  else
-    skip "проб не было (--probe-every 0 или нет ключа)"
-  fi
-
-  # пул ВО ВРЕМЯ нагрузки — решает вопрос «ждал ли запрос места»
-  if [ -s "$POOL_FILE" ]; then
-    info "пул и очередь во время нагрузки ($(wc -l < "$POOL_FILE") снимков по ${POOL_EVERY} с):"
-    awk -F'\t' '
-      { n++
-        if ($3+0 > mxu) { mxu = $3+0; at = $1 }
-        if ($4+0 > mxw) { mxw = $4+0 }
-        if ($7+0 > mxb) { mxb = $7+0 }
-        if ($10+0 > mxq) { mxq = $10+0 }
-        if (n == 1) { u0 = $10 }
-        last = $10
-      }
-      END {
-        printf "  usage_ratio максимум = %.3f (в %s)\n", mxu, strftime("%H:%M:%S", at)
-        printf "  waiting_for_room максимум = %d\n", mxw
-        printf "  busy_regions максимум = %d\n", mxb
-        printf "  queue_waited_total: %s → %s (выросло за прогон на %s)\n", u0, last, last - u0
-        printf "  queue_wait_longest максимум = %s с\n", mxq
-      }' "$POOL_FILE" | sed 's/^/       /'
-    note "usage_ratio близко к 1 при выросшем queue_waited_total = новые ходы ждали позиции в пуле"
-  fi
-  info "файлы: поток $raw ; сэмплер $tsv ; пробы $PROBE_FILE ; пул $POOL_FILE"
-  note "сэмплер TSV — главный артефакт: колонки 5/6/7 (pgscan_direct, compact_stall, pgmajfault) и 8/10 (PSI) различают память, диск и GPU"
+  print_summaries "$tsv"
 }
 
 # --- 8. как читать -----------------------------------------------------------
@@ -759,7 +897,10 @@ if [ "$DO_PASSIVE" = 1 ]; then
   sec_log
   sec_api
 fi
-if [ "$DO_LOAD" = 1 ]; then
+if [ "$WATCH" != 0 ]; then
+  resolve_key || info "без ключа пробы генерации не пойдут"
+  sec_watch
+elif [ "$DO_LOAD" = 1 ]; then
   resolve_key || info "без ключа нагрузка пропускается"
   sec_load
 fi

@@ -20,6 +20,7 @@
 #   bash scripts/diag-stall.sh --no-load       # только пассивная часть
 #   bash scripts/diag-stall.sh --load-only     # сразу нагрузка (без пассивной)
 #   bash scripts/diag-stall.sh --tokens 16000 --prompt-kib 200
+#   bash scripts/diag-stall.sh --pool-every 5 --probe-every 10
 #   bash scripts/diag-stall.sh --key-name agent1
 #   CHECK_KEY=... bash scripts/diag-stall.sh
 #
@@ -60,10 +61,11 @@ TOKENS=16000          # max_tokens нагрузочного запроса
 MAX_TIME=900          # потолок на нагрузочный запрос, с
 INTERVAL=1            # период сэмплера, с
 PROBE_EVERY=10        # раз в N секунд дёргать «ещё жив ли»
+POOL_EVERY=5          # раз в N секунд снимать пул/очередь из контейнера
 OUTDIR=""
 TIMEOUT=20            # таймаут коротких HTTP-вызовов
 
-usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -74,6 +76,7 @@ while [ $# -gt 0 ]; do
     --max-time)  MAX_TIME=${2:?}; shift 2 ;;
     --interval)  INTERVAL=${2:?}; shift 2 ;;
     --probe-every) PROBE_EVERY=${2:?}; shift 2 ;;
+    --pool-every)  POOL_EVERY=${2:?}; shift 2 ;;
     --outdir)    OUTDIR=${2:?}; shift 2 ;;
     -k|--key-name) KEY_NAME=${2:?}; shift 2 ;;
     -b|--base)   BASE=${2:?}; BASE_SET=1; shift 2 ;;
@@ -287,7 +290,9 @@ sec_gpu() {
     for vt in mem_info_vram_total mem_info_vram_size mem_info_vram_visible; do
       [ -f "$d/$vt" ] && { vram_total=$(cat "$d/$vt"); break; }
     done
-    info "$d: GTT used = $(( ${gu:-0} / 1024 / 1024 )) GiB из $(( ${gs:-0} / 1024 / 1024 )) GiB   VRAM used = $(( ${vu:-0} / 1024 / 1024 )) GiB из $(( ${vram_total:-0} / 1024 / 1024 )) GiB"
+    # mem_info_* отдают БАЙТЫ: делить надо на 1024^3 (первая версия делила на
+    # 1024^2 и подписывала GiB — вранье в 1024 раза)
+    info "$d: GTT used = $(( ${gu:-0} / 1024 / 1024 / 1024 )) GiB из $(( ${gs:-0} / 1024 / 1024 / 1024 )) GiB   VRAM used = $(( ${vu:-0} / 1024 / 1024 / 1024 )) GiB из $(( ${vram_total:-0} / 1024 / 1024 / 1024 )) GiB"
     local busy; busy=$(cat "$d/gpu_busy_percent" 2>/dev/null)
     [ -n "$busy" ] && info "gpu_busy_percent = $busy"
     # KV-пул живёт в GTT: сравниваем занятое с тем, что должен держать наш старт
@@ -424,9 +429,47 @@ sec_api() {
 }
 
 # --- 7. нагрузка + сэмплер ---------------------------------------------------
+# Проба «ещё жив ли» двумя разными маршрутами: /healthz не трогает GPU и слоты,
+# генерация трогает. Без разделения «прокси жив, а генерация стоит» неотличимо
+# от «не отвечает ничего». Коды пишутся как есть: 000 = таймаут или отказ коннекта.
+probe_once() { # $1=epoch
+  local ep=$1 r body code t
+  r=$(curl -s -o /dev/null --max-time 20 -w '%{http_code} %{time_total}' "$BASE/healthz" 2>/dev/null)
+  printf '%s\thealthz\t%s\n' "$ep" "${r:-000 0}" >> "$PROBE_FILE"
+  body=$(printf '{"model":"%s","messages":[{"role":"user","content":"ок"}],"max_tokens":8}' "$MODEL")
+  # тело пишем в файл: при не-200 оно и есть ответ на вопрос «кто отказал»
+  t=$(mktemp "${TMPDIR:-/tmp}/diag-probe-body.XXXXXX")
+  r=$(curl -s -o "$t" --max-time 120 -w '%{http_code} %{time_total}' -X POST \
+        -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+        -d "$body" "$BASE/v1/chat/completions" 2>/dev/null)
+  code=${r%% *}
+  if [ "${code:-000}" != "200" ] && [ "$(find "$PROBE_FAIL_DIR" -type f 2>/dev/null | wc -l)" -lt 5 ]; then
+    mv "$t" "$PROBE_FAIL_DIR/${ep}.${code:-000}.body" 2>/dev/null || rm -f "$t"
+  else
+    rm -f "$t"
+  fi
+  printf '%s\tgen\t%s\n' "$ep" "${r:-000 0}" >> "$PROBE_FILE"
+}
+
+# Снимок пула и очереди из контейнера. Именно эта колонка решает, ждал ли запрос
+# места: usage_ratio и waiting_for_room — датчики текущего момента.
+POOL_SNIPPET='import urllib.request as u,json,re
+c=json.loads(u.urlopen("http://127.0.0.1:8731/cache",timeout=5).read())
+p=c.get("pool",{})
+m=u.urlopen("http://127.0.0.1:8731/metrics",timeout=5).read().decode()
+g=lambda k:(re.search(r"halogen:"+k+r" ([0-9.eE+-]+)",m) or [None,"0"])[1]
+print(p.get("used"),p.get("usage_ratio"),p.get("waiting_for_room"),p.get("room_clamped"),p.get("busy_regions"),p.get("held_regions"),c.get("dropped"),c.get("evicted"),g("queue_waited_total"),g("queue_wait_seconds_total"),g("queue_wait_longest_seconds"),sep="\t")'
+
+pool_once() { # $1=epoch
+  [ "$HAVE_PODMAN" = 1 ] || return 0
+  local out
+  out=$($PODMAN exec "$CONTAINER" python3 -c "$POOL_SNIPPET" 2>/dev/null)
+  [ -n "$out" ] && printf '%s\t%s\n' "$1" "$out" >> "$POOL_FILE"
+}
+
 sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_сек
   local tsv=$1 per=$2 probe=$3 dur=$4
-  local t0 now i=0
+  local t0 now i=0 last_pool=0
   t0=$(date +%s)
   printf 'epoch\tload1\tmemavail_kib\tmlocked_kib\tpgscan_direct\tcompact_stall\tpgmajfault\tpsi_mem_some\tpsi_mem_total\tpsi_io_some\tpsi_io_total\tgpbusy\tgtt_gib\tdstate\n' > "$tsv"
   while :; do
@@ -449,23 +492,19 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
     for d in /sys/class/drm/card*/device; do
       [ -f "$d/mem_info_gtt_used" ] || continue
       busy=$(cat "$d/gpu_busy_percent" 2>/dev/null)
-      gtt=$(( $(cat "$d/mem_info_gtt_used" 2>/dev/null || echo 0) / 1024 / 1024 ))
+      gtt=$(( $(cat "$d/mem_info_gtt_used" 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
       break
     done
     # Проба «ещё жив ли» — В ФОНЕ. Синхронная проба зависла бы вместе с сервером
     # и съела ровно те секунды, ради которых ведётся сэмплер.
     if [ "$probe" != 0 ] && [ $((i % probe)) = 0 ] && [ -n "$KEY" ]; then
-      (
-        local t1 t2 pc body
-        # %3N есть не везде: если date выдал не цифры, берём целые секунды
-        t1=$(date +%s%3N 2>/dev/null); case $t1 in *[!0-9]*|'') t1=$(date +%s)000 ;; esac
-        body=$(printf '{"model":"%s","messages":[{"role":"user","content":"ок"}],"max_tokens":8}' "$MODEL")
-        pc=$(curl -s -o /dev/null --max-time 120 -w '%{http_code}' -X POST \
-              -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
-              -d "$body" "$BASE/v1/chat/completions" 2>/dev/null)
-        t2=$(date +%s%3N 2>/dev/null); case $t2 in *[!0-9]*|'') t2=$(date +%s)000 ;; esac
-        printf '%s\t%s\t%s\n' "$now" "${pc:-000}" "$(( t2 - t1 ))" >> "$PROBE_FILE"
-      ) &
+      probe_once "$now" &
+    fi
+    # Состояние пула — тоже в фоне и тоже ВО ВРЕМЯ нагрузки: мгновенные датчики
+    # (waiting_for_room, busy_regions) после прогона уже нули.
+    if [ "$POOL_EVERY" != 0 ] && [ $((now - last_pool)) -ge "$POOL_EVERY" ]; then
+      last_pool=$now
+      pool_once "$now" &
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$now" "$la" "$ma" "$mlk" "$psd" "$cs" "$pmf" "$pms" "$pmt" "$pis" "$pit" "$busy" "$gtt" "$ds" >> "$tsv"
@@ -504,6 +543,8 @@ sec_load() {
   raw=$(mktemp "${TMPDIR:-/tmp}/diag-stream.XXXXXX.sse")
   tsv=$(mktemp "${TMPDIR:-/tmp}/diag-samples.XXXXXX.tsv")
   PROBE_FILE=$(mktemp "${TMPDIR:-/tmp}/diag-probes.XXXXXX.tsv")
+  POOL_FILE=$(mktemp "${TMPDIR:-/tmp}/diag-pool.XXXXXX.tsv")
+  PROBE_FAIL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/diag-probe-fail.XXXXXX")
 
   # сэмплер живёт чуть дольше запроса: столл часто продолжается после его конца
   sampler "$tsv" "$INTERVAL" "$PROBE_EVERY" $((MAX_TIME + 30)) &
@@ -513,10 +554,14 @@ sec_load() {
   t0=$(date +%s)
   # Разбор потока — циклом на bash, а не awk: mawk (на Ubuntu это /usr/bin/awk)
   # буферизует вход и выдаёт строки пачкой в конце, поэтому живые паузы им
-  # измерить нельзя — проверено экспериментально на mawk 1.3.4. Копию пишет
-  # отдельный fd, чтобы не открывать файл на каждую строку. Разрешение — 1 с
-  # (EPOCHSECONDS целочисленный; форка на строку нет).
-  local sse_tokens=0 ttft=-1 total_s=0 gap=0 gap_at=0
+  # измерить нельзя — проверено экспериментально на mawk 1.3.4.
+  #
+  # Пауза считается по ЛЮБОМУ data:-чанку, а не только по content. Первая версия
+  # считала только content — и запрос под HALOGEN_REASONING_EFFORT=xhigh выглядел
+  # как 288-секундное зависание, хотя модель просто ~4.5 минуты думала: дельты
+  # размышлений в content не попадают. Так что «тишина» = тишина всего потока.
+  local chunks=0 content_chunks=0 reason_chunks=0 keepalive=0
+  local ttft=-1 total_s=0 gap=0 gap_at=0
   local t_first=-1 t_now g line t_start t_last
   t_start=${EPOCHSECONDS:-$(date +%s)}
   t_last=$t_start
@@ -524,15 +569,24 @@ sec_load() {
   while IFS= read -r line; do
     printf '%s\n' "$line" >&3
     case $line in
+      ":"*) keepalive=$((keepalive + 1)) ;;
       data:*"[DONE]"*) ;;
-      data:*'"content":""'*) ;;
-      data:*'"content":'*)
+      data:*)
         t_now=${EPOCHSECONDS:-$(date +%s)}
         [ "$t_first" -lt 0 ] && t_first=$t_now
         g=$((t_now - t_last))
-        if [ "$g" -gt "$gap" ]; then gap=$g; gap_at=$sse_tokens; fi
+        if [ "$g" -gt "$gap" ]; then gap=$g; gap_at=$chunks; fi
         t_last=$t_now
-        sse_tokens=$((sse_tokens + 1))
+        chunks=$((chunks + 1))
+        # Подсчёт через [[ == ]], а не case: шаблоны с кавычками внутри case
+        # разбираются ненадёжно (тот же шаблон то матчится, то ломает парсер —
+        # поймано на mawk-песочнице). Кавычки в [[ ]] значат «буквально».
+        if [[ $line == *'"content":'* && $line != *'"content":""'* ]]; then
+          content_chunks=$((content_chunks + 1))
+        fi
+        if [[ $line == *reasoning* || $line == *thinking* ]]; then
+          reason_chunks=$((reason_chunks + 1))
+        fi
         ;;
     esac
   done < <(curl -sN --max-time "$MAX_TIME" -X POST \
@@ -543,8 +597,10 @@ sec_load() {
   total_s=$((t_now - t_start))
   [ "$t_first" -ge 0 ] && ttft=$((t_first - t_start))
   {
-    printf 'sse_tokens=%d\nttft_s=%d\ntotal_s=%d\nmax_gap_s=%d\nmax_gap_after_token=%d\n' \
-      "$sse_tokens" "$ttft" "$total_s" "$gap" "$gap_at"
+    printf 'chunks=%d\ncontent_chunks=%d\nreasoning_chunks=%d\nkeepalive=%d\n' \
+      "$chunks" "$content_chunks" "$reason_chunks" "$keepalive"
+    printf 'ttft_s=%d\ntotal_s=%d\nmax_gap_s=%d\nmax_gap_after_chunk=%d\n' \
+      "$ttft" "$total_s" "$gap" "$gap_at"
   } > "${tsv}.stream"
   t1=$t_now
 
@@ -559,19 +615,25 @@ sec_load() {
   info "разбор потока (разрешение 1 с, EPOCHSECONDS):"
   sed 's/^/       /' "${tsv}.stream"
   info "стена запроса: $((t1 - t0)) с"
-  local ttf tot toks
+  local ttf tot ch cnt rsn ka
   ttf=$(sed -n 's/^ttft_s=//p' "${tsv}.stream"); ttf=${ttf:-0}
   tot=$(sed -n 's/^total_s=//p' "${tsv}.stream"); tot=${tot:-0}
-  toks=$(sed -n 's/^sse_tokens=//p' "${tsv}.stream"); toks=${toks:-0}
+  ch=$(sed -n 's/^chunks=//p' "${tsv}.stream"); ch=${ch:-0}
+  cnt=$(sed -n 's/^content_chunks=//p' "${tsv}.stream"); cnt=${cnt:-0}
+  rsn=$(sed -n 's/^reasoning_chunks=//p' "${tsv}.stream"); rsn=${rsn:-0}
+  ka=$(sed -n 's/^keepalive=//p' "${tsv}.stream"); ka=${ka:-0}
   if [ "$ttf" -gt 0 ]; then
     info "TTFT = ${ttf} с (холодный prefill: справочник ~2100 tok/s, 131k токенов за ~62 с)"
   fi
-  if [ "$toks" -gt 0 ] && [ $((tot - ttf)) -gt 0 ]; then
-    info "генерация: ${toks} токенов за $((tot - ttf)) с ≈ $((toks / (tot - ttf))) tok/s (в бою было 49–105, медиана 76.9)"
+  if [ "$ch" -gt 0 ] && [ $((tot - ttf)) -gt 0 ]; then
+    info "генерация: ${ch} чанков (content ${cnt}, размышлений ${rsn}, keepalive ${ka}) за $((tot - ttf)) с ≈ $((ch / (tot - ttf))) чанк/с (в бою 49–105 tok/s, медиана 76.9)"
+  fi
+  if [ "$rsn" -gt 0 ]; then
+    note "чанки размышлений есть (${rsn}) — при xhigh это норма; пауза считается по всему потоку, а не только по content"
   fi
   local gap; gap=$(sed -n 's/^max_gap_s=//p' "${tsv}.stream")
   if [ "${gap:-0}" -ge 30 ]; then
-    warn "в потоке была пауза ${gap} с (после токена №$(sed -n 's/^max_gap_after_token=//p' "${tsv}.stream")) — это и есть «перестаёт отвечать»"
+    warn "в потоке была пауза ${gap} с (после чанка №$(sed -n 's/^max_gap_after_chunk=//p' "${tsv}.stream")) — это и есть «перестаёт отвечать»"
   elif [ "${gap:-0}" -ge 5 ]; then
     warn "пауза ${gap} с внутри потока"
   else
@@ -603,20 +665,55 @@ sec_load() {
       printf "  gpu_busy max = %s%%   GTT max = %s GiB\n", busym, gttm
     }' "$tsv" | sed 's/^/       /'
 
-  # пробы «ещё жив ли» — главный измеряемый симптом
+  # пробы «ещё жив ли» — главный измеряемый симптом. healthz и генерация
+  # разделены: «прокси жив, генерация стоит» и «не отвечает ничего» — разные диагнозы.
   if [ -s "$PROBE_FILE" ]; then
-    info "пробы «ещё жив ли» (крошечный запрос раз в ${PROBE_EVERY} с, параллельно нагрузке):"
-    awk -F'\t' '{ n++; if ($2 != "200") bad++; if ($3+0 > mx) { mx = $3+0; at = $1; code = $2 }; sum += $3 }
+    info "пробы «ещё жив ли» (раз в ${PROBE_EVERY} с, параллельно нагрузке):"
+    awk -F'\t' '
+      { split($3, a, " "); c = a[1]; t = a[2] + 0
+        n[$2]++; sum[$2] += t
+        if (t > mx[$2]) { mx[$2] = t; at[$2] = $1; mxc[$2] = c }
+        if (c != "200") { bad[$2]++; codes[$2 " " c]++ } }
       END {
-        printf "  всего %d, не-200: %d, средняя = %d мс, самая долгая = %d мс (код %s, в %s)\n",
-               n, bad+0, (n ? sum/n : 0), mx+0, (code ? code : "-"),
-               (at ? strftime("%H:%M:%S", at) : "-")
+        for (k in n)
+          printf "  %-8s всего %d, не-200: %d, средняя %.1f с, самая долгая %.1f с (код %s, в %s)\n",
+                 k, n[k], bad[k]+0, sum[k]/n[k], mx[k], (mxc[k] ? mxc[k] : "-"), strftime("%H:%M:%S", at[k])
+        for (ck in codes) printf "  код%s × %d\n", substr(ck, index(ck, " ")), codes[ck]
       }' "$PROBE_FILE" | sed 's/^/       /'
-    note "долгая проба при спокойной памяти = ход упирается в очередь/слоты, а не в хост"
+    note "000 = таймаут или отказ коннекта; 4xx/5xx = отказ кто-то вернул (тело первых пяти — в $PROBE_FAIL_DIR)"
+    if [ -d "$PROBE_FAIL_DIR" ] && [ -n "$(ls -A "$PROBE_FAIL_DIR" 2>/dev/null)" ]; then
+      info "тела отказов (первые байты):"
+      for f in "$PROBE_FAIL_DIR"/*; do
+        [ -f "$f" ] || continue
+        printf '       %s: %s\n' "$(basename "$f")" "$(head -c 200 "$f" | tr '\n' ' ')"
+      done
+    fi
   else
     skip "проб не было (--probe-every 0 или нет ключа)"
   fi
-  info "файлы: поток $raw ; сэмплер $tsv ; пробы $PROBE_FILE"
+
+  # пул ВО ВРЕМЯ нагрузки — решает вопрос «ждал ли запрос места»
+  if [ -s "$POOL_FILE" ]; then
+    info "пул и очередь во время нагрузки ($(wc -l < "$POOL_FILE") снимков по ${POOL_EVERY} с):"
+    awk -F'\t' '
+      { n++
+        if ($3+0 > mxu) { mxu = $3+0; at = $1 }
+        if ($4+0 > mxw) { mxw = $4+0 }
+        if ($7+0 > mxb) { mxb = $7+0 }
+        if ($10+0 > mxq) { mxq = $10+0 }
+        if (n == 1) { u0 = $10 }
+        last = $10
+      }
+      END {
+        printf "  usage_ratio максимум = %.3f (в %s)\n", mxu, strftime("%H:%M:%S", at)
+        printf "  waiting_for_room максимум = %d\n", mxw
+        printf "  busy_regions максимум = %d\n", mxb
+        printf "  queue_waited_total: %s → %s (выросло за прогон на %s)\n", u0, last, last - u0
+        printf "  queue_wait_longest максимум = %s с\n", mxq
+      }' "$POOL_FILE" | sed 's/^/       /'
+    note "usage_ratio близко к 1 при выросшем queue_waited_total = новые ходы ждали позиции в пуле"
+  fi
+  info "файлы: поток $raw ; сэмплер $tsv ; пробы $PROBE_FILE ; пул $POOL_FILE"
   note "сэмплер TSV — главный артефакт: колонки 5/6/7 (pgscan_direct, compact_stall, pgmajfault) и 8/10 (PSI) различают память, диск и GPU"
 }
 
@@ -624,6 +721,9 @@ sec_load() {
 sec_read() {
   section "8. Как читать результат"
   cat <<'TXT'
+  · usage_ratio → 1 и выросший queue_waited_total при спокойной памяти
+      → новые ходы ждут ПОЗИЦИИ в KV-пуле (прежние разговоры держат регионы).
+        Это про HALOGEN_KV_POOL_POSITIONS / HALOGEN_KV_SLOTS, а не про RAM.
   · Mlocked ≈ 0 + растущий pgscan_direct/compact_stall + PSI memory >10%
       → механизм №2: ядро отдаёт страницы весов под таблицу. Правка —
         HALOGEN_WEIGHTS_LOCK=1 (+ memlock unlimited в limits.conf, перелогин)

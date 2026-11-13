@@ -161,9 +161,12 @@ fi
 # клиента = не отработал ARP, то есть интерфейс лежал, а не halogen.
 detect_nic() {
   local i n
+  # Интерфейс, на котором ЖИВЁТ адрес. Именно так, а не `ip route get $LAN`:
+  # для собственного адреса route get возвращает `dev lo`, и первая версия
+  # ловила lo (на сервере это дало ethtool по lo → «Operation not supported»).
   if [ -n "$LAN" ] && command -v ip >/dev/null 2>&1; then
-    n=$(ip -o route get "$LAN" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
-    [ -n "$n" ] && { printf '%s' "$n"; return 0; }
+    n=$(ip -o addr show 2>/dev/null | awk -v a="$LAN" 'index($4, a "/")==1 {print $2; exit}')
+    [ -n "$n" ] && [ "$n" != "lo" ] && { printf '%s' "$n"; return 0; }
   fi
   # запасной путь: сначала тот, что реально up и с линком, потом любой физический
   local pass
@@ -365,6 +368,22 @@ sec_gpu() {
   if [ -n "$car" ] && [ "$car" = "0" ]; then warn "carrier=0 — линка физически нет прямо сейчас"
   elif [ -n "$st" ] && [ "$st" != "up" ]; then warn "operstate=$st — интерфейс не up"
   else pass "интерфейс $NIC сейчас up и с carrier"
+  fi
+  # Беспроводной uplink — отдельный, очень громкий случай: Wi-Fi-разрыв
+  # выглядит ровно как «машина зависла» (ARP не отвечает, SSH рвётся, ядро при
+  # этом живое и ничего про линк не пишет — mac80211 этого не логирует).
+  if [ -e "/sys/class/net/$NIC/wireless" ] || [ -e "/sys/class/net/$NIC/phy80211" ]; then
+    warn "интерфейс $NIC — Wi-Fi. Весь путь к серверу (агенты, прокси, SSH) идёт по воздуху: разрыв ассоциации выглядит ровно как «машина зависла», а ядро живёт и в журнал про линк ничего не пишет"
+    info "качество линка: $(awk -v n="$NIC" '$1==n {printf "quality=%s level=%s dBm noise=%s", $3, $4, $5}' /proc/net/wireless 2>/dev/null)"
+    command -v iw >/dev/null 2>&1 && info "iw: $(iw dev "$NIC" link 2>/dev/null | tr '\n' ' ')"
+    local down="" j
+    for j in /sys/class/net/*; do
+      case ${j##*/} in lo|docker*|veth*|br-*|cni*|tun*|wg*) continue ;; esac
+      [ "$(cat "$j/carrier" 2>/dev/null)" = "0" ] && down="$down ${j##*/}"
+      [ -z "$(cat "$j/carrier" 2>/dev/null)" ] && [ "$(cat "$j/operstate" 2>/dev/null)" = "down" ] && down="$down ${j##*/}"
+    done
+    [ -n "$down" ] && warn "проводные интерфейсы без линка:$down — если есть кабель и порт, проводной uplink снимает вопрос целиком"
+    info "история Wi-Fi (роуминг/деauth): journalctl -b | grep -iE 'wlp|deauth|roam|associated|NetworkManager'"
   fi
   info "история линка (кто падал): journalctl -k | grep -iE 'link is (down|up)|nic|reset adapter'"
 }
@@ -570,7 +589,7 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
   local tsv=$1 per=$2 probe=$3 dur=$4
   local t0 now i=0 last_pool=0
   t0=$(date +%s)
-  printf 'epoch\tload1\tmemavail_kib\tmlocked_kib\tpgscan_direct\tcompact_stall\tpgmajfault\tpsi_mem_some\tpsi_mem_total\tpsi_io_some\tpsi_io_total\tgpbusy\tgtt_gib\tdstate\tnic_state\tnic_carrier\tnic_drop\tnic_err\n' > "$tsv"
+  printf 'epoch\tload1\tmemavail_kib\tmlocked_kib\tpgscan_direct\tcompact_stall\tpgmajfault\tpsi_mem_some\tpsi_mem_total\tpsi_io_some\tpsi_io_total\tgpbusy\tgtt_gib\tdstate\tnic_state\tnic_carrier\tnic_drop\tnic_err\tnic_wlq\tnic_level\n' > "$tsv"
   while :; do
     now=$(date +%s)
     [ $((now - t0)) -gt "$dur" ] && break
@@ -603,6 +622,14 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
       ndrop=$(( $(cat "/sys/class/net/$NIC/statistics/rx_dropped" 2>/dev/null || echo 0) + $(cat "/sys/class/net/$NIC/statistics/tx_dropped" 2>/dev/null || echo 0) ))
       nerr=$(( $(cat "/sys/class/net/$NIC/statistics/rx_errors" 2>/dev/null || echo 0) + $(cat "/sys/class/net/$NIC/statistics/tx_errors" 2>/dev/null || echo 0) ))
     fi
+    # Качество Wi-Fi-линка: /proc/net/wireless даёт `quality level noise` в
+    # процентах и дБм. Обвал уровня = разрыв ассоциации, то есть и есть наш
+    # «Host is down» при живом ядре.
+    local wlq="" wlvl=""
+    if [ -n "$NIC" ]; then
+      wlq=$(awk -v n="$NIC" '$1==n {gsub(/\/.*/,"",$3); print $3}' /proc/net/wireless 2>/dev/null)
+      wlvl=$(awk -v n="$NIC" '$1==n {gsub(/dBm/,"",$4); print $4}' /proc/net/wireless 2>/dev/null)
+    fi
     # Проба «ещё жив ли» — В ФОНЕ. Синхронная проба зависла бы вместе с сервером
     # и съела ровно те секунды, ради которых ведётся сэмплер.
     if [ "$probe" != 0 ] && [ $((i % probe)) = 0 ] && [ -n "$KEY" ]; then
@@ -614,8 +641,8 @@ sampler() { # $1=tsv $2=период $3=probe_every $4=длительность_
       last_pool=$now
       pool_once "$now" &
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$now" "$la" "$ma" "$mlk" "$psd" "$cs" "$pmf" "$pms" "$pmt" "$pis" "$pit" "$busy" "$gtt" "$ds" "$nst" "$ncar" "$ndrop" "$nerr" >> "$tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$now" "$la" "$ma" "$mlk" "$psd" "$cs" "$pmf" "$pms" "$pmt" "$pis" "$pit" "$busy" "$gtt" "$ds" "$nst" "$ncar" "$ndrop" "$nerr" "$wlq" "$wlvl" >> "$tsv"
     i=$((i + 1))
     sleep "$per"
   done
@@ -637,6 +664,8 @@ print_summaries() { # $1=tsv
       if ($13!="" && $13+0>gttm) gttm=$13+0
       if ($15!="" && $15!="up") { notup++; if ($15!="" && $15!="down") nst=$15 }
       if ($16!="" && $16+0==0) nocar++
+      if ($19!="" && (wqmin=="" || $19+0<wqmin)) wqmin=$19+0
+      if ($20!="" && (wvmin=="" || $20+0<wvmin)) wvmin=$20+0
       if (first==0) { first=1; s0=$5; c0=$6; f0=$7; mt0=$9; it0=$11; d0=$17; er0=$18 }
       e0=$5; e1=$6; e2=$7; e3=$9; e4=$11; d1=$17; er1=$18
     }
@@ -651,6 +680,7 @@ print_summaries() { # $1=tsv
       printf "  процессов в D, максимум = %d\n", dsm
       printf "  gpu_busy max = %s%%   GTT max = %s GiB\n", busym, gttm
       printf "  NIC: отсчётов не-up = %d, без carrier = %d, delta drop = %d, delta err = %d\n", notup+0, nocar+0, d1-d0, er1-er0
+      if (wqmin != "") printf "  Wi-Fi: худший quality = %d%%, худший уровень = %d дБм\n", wqmin, wvmin
     }' "$tsv" | sed 's/^/       /'
 
   # пробы «ещё жив ли» — главный измеряемый симптом. healthz и генерация

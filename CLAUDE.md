@@ -571,10 +571,21 @@ auth-provider, Makefile, примеры env/secrets); смоук-тест auth-p
    (**применено 2026-11-12: 3**, см. §1.2 — это единственный рычаг, который
    чинит поведение, а не докупает память).
    Какие из (в)/(г) нужны цифры, видно из `GET /cache` (там `hit_rate`,
-   `pool.used`, `dropped`, `waiting_for_room`) — но через reverse-proxy `/cache`
-   не маршрутизируется вовсе (матчеры — только `/healthz` и `/v1*`, остальное
-   уходит catch-all'ом к web-ui), так что читать изнутри контейнера. Молча не
-   меняем ничего.
+   `token_hit_rate`, а в `pool` — `used`, `usage_ratio`, `room_clamped`,
+   `dropped`, `waiting_for_room`, `waiting_s`; `/docs/halogen-flash-server/docs/api.md:71`)
+   — но через reverse-proxy `/cache` не маршрутизируется вовсе (матчеры —
+   только `/healthz` и `/v1*`, остальное уходит catch-all'ом к web-ui; с
+   публичным `Host` он поэтому тоже достаёт web-ui, а не halogen).
+   **Как читать (уточнено 2026-11-13):** `/cache` отдаёт тот же порт 8731, что
+   и всё остальное (`api.md:3` — «one port serves everything»), а `curl` в
+   образе halogen **нет** (проверено: `podman exec halogen-flash-server curl`
+   → `crun: executable file curl not found`). Значились два пути, оба агентом
+   не проверены: `podman exec halogen-reverse-proxy wget -qO-
+   http://halogen-flash-server:8731/cache` (в образе Caddy есть busybox `wget`)
+   или `podman exec halogen-flash-server python3 -c "import
+   urllib.request as u;print(u.urlopen('http://127.0.0.1:8731/cache').read().decode())"`
+   (образ на uvicorn, python там обязан быть). Попробовать и записать, что
+   сработало. Молча не меняем ничего.
    **Уточнение 2026-11-12, до того как что-то растить:** «16 раз режет
    `max_tokens`» посчитано по строке `cannot grow …`, которую апстрим в 0.20.1
    объявил рутинной (§5) — это верхняя оценка, а не измерение. На 0.20.4 точный
